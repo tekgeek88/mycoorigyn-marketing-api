@@ -1,32 +1,27 @@
-# Stage 1: Build the Go binary
-FROM golang:1.25.0 AS builder
+FROM golang:1.25.0-alpine AS build
 
-# Set the environement
-ARG ENV=staging
+ARG ENV=production
 ENV ENV=${ENV}
-WORKDIR /app
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
 
 COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mycoorigyn-marketing-api ./cmd/server
 
-RUN make build ENV=$ENV
+FROM alpine:3.21
 
-# Stage 2: Create minimal container
-FROM alpine:latest
-ARG ENV=staging
+ARG ENV=production
 ENV ENV=${ENV}
 
-WORKDIR /app
+RUN addgroup -S app && adduser -S app -G app
+RUN apk add --no-cache ca-certificates tzdata
 
-# Copy the binary from the builder stage
-COPY --from=builder /app/mycoorigyn-marketing-api .
+USER app
 
-RUN apk add --no-cache ca-certificates
-
-# Install tzdata for timezone support
-RUN apk add --no-cache tzdata
-
-# Fix permission just in case
-RUN chmod +x ./mycoorigyn-marketing-api
+COPY --from=build /out/mycoorigyn-marketing-api /usr/local/bin/mycoorigyn-marketing-api
 
 EXPOSE 8080
-CMD ["./mycoorigyn-marketing-api"]
+ENTRYPOINT ["mycoorigyn-marketing-api"]
