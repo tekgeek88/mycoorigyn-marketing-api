@@ -1,0 +1,48 @@
+name: Test and Build Go Project
+
+on:
+  push:
+    branches:
+      - main  # Trigger only on the main branch
+  pull_request:
+    branches:
+      - main  # Also trigger on pull requests targeting the main branch
+
+jobs:
+  test-and-build:
+    name: Run Tests and Verify Build
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout the repository
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Step 2: Set up Go environment
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 1.25  # Use the current Go version for your project
+
+      # Step 3: Cache Go modules for faster builds
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/go-build  # Cache directory for Go build artifacts
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      # Step 4: Install dependencies
+      - name: Install Dependencies
+        run: go mod tidy
+
+      # Step 5: Run Tests
+      - name: Run Tests
+        run: go test ./... -v
+        env:
+          ENV: testing
+
+      # Step 6: Verify Build
+      - name: Test Build
+        run: go build -v ./...
