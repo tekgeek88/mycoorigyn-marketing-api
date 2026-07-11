@@ -2,4 +2,4 @@
 .gocache/
 bin/
 coverage.out
-server
+/server
