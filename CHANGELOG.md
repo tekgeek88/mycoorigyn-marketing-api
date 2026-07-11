@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 --------------------------------
 
+## [0.0.2] - 2026-07-11
+### Fixed
+- Fixed deployment action
+
+--------------------------------
+
 ## [0.0.0] - 2026-07-11
 ### Added
 - Initial release
