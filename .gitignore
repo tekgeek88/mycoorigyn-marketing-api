@@ -1,0 +1,5 @@
+.env
+.gocache/
+bin/
+coverage.out
+server
