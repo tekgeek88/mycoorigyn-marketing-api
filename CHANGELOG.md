@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 --------------------------------
 
+## [0.0.4] - 2026-07-11
+### Added
+- Added visitor counter.
+
+--------------------------------
+
 ## [0.0.3] - 2026-07-11
 ### Added
 - Added split `DB_*` database configuration support alongside `DATABASE_URL`.
