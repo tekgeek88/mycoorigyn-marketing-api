@@ -43,13 +43,12 @@ The `Makefile` follows the same local pattern and automatically includes `.env` 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `ENV` | No | `development` | Runtime environment label. Dotenv loading is skipped in `staging` and `production`. |
-| `PORT` | No | `8080` | HTTP port used by the API process itself. |
-| `APP_PORT` | No | `8080` | Host port published by Docker Compose for local access to the app container. |
-| `POSTGRES_PORT` | No | `5432` | Host port used for local PostgreSQL access from shell-based tools like `make migrate-up` and as the local default for `DB_PORT`. |
+| `APP_LISTEN_PORT` | No | `8080` | Single source for host/API port. Controls `PORT` and `APP_PORT`. |
+| `DB_LISTEN_PORT` | No | `5432` | Single source for host PostgreSQL port used by `POSTGRES_PORT` and `DB_PORT`. |
 | `DATABASE_URL` | Conditionally | none | PostgreSQL connection string. Preferred when provided. |
 | `DB_NAME` | Conditionally | none | Database name when using split DB config instead of `DATABASE_URL`. |
 | `DB_HOST` | Conditionally | none | Database host when using split DB config instead of `DATABASE_URL`. |
-| `DB_PORT` | Conditionally | `POSTGRES_PORT` or `5432` | Database port when using split DB config instead of `DATABASE_URL`. |
+| `DB_PORT` | Conditionally | `DB_LISTEN_PORT` or `5432` | Database port when using split DB config instead of `DATABASE_URL`. |
 | `DB_USER` | Conditionally | none | Database user when using split DB config instead of `DATABASE_URL`. |
 | `DB_PASSWORD` | Conditionally | none | Database password when using split DB config instead of `DATABASE_URL`. |
 | `DB_SSLMODE` | No | `disable` | PostgreSQL SSL mode for split DB config. Useful for cluster deployments. |
@@ -64,7 +63,7 @@ The app accepts either:
 - `DATABASE_URL`
 - or all of `DB_NAME`, `DB_HOST`, `DB_PORT`, `DB_USER`, and `DB_PASSWORD`
 
-The preferred K8s-style configuration is the split `DB_*` set, with `DATABASE_URL` kept as an override for platforms that inject a single DSN. For local development, `DB_PORT` defaults to `POSTGRES_PORT`, so changing `POSTGRES_PORT` is usually enough.
+The preferred K8s-style configuration is the split `DB_*` set, with `DATABASE_URL` kept as an override for platforms that inject a single DSN. For local development, `PORT` and `APP_PORT` default to `APP_LISTEN_PORT`; `DB_PORT` defaults to `DB_LISTEN_PORT`.
 
 ## Database Migrations
 
@@ -77,11 +76,11 @@ make migrate-up
 make migrate-down
 ```
 
-If `DATABASE_URL` is not set explicitly, the `Makefile` derives a local default from `DB_*` variables. `DB_PORT` defaults to `POSTGRES_PORT`.
+If `DATABASE_URL` is not set explicitly, the `Makefile` derives a local default from `DB_*` variables. `DB_PORT` defaults to `DB_LISTEN_PORT`.
 
 ```sh
-POSTGRES_PORT=55432 docker compose up -d postgres
-POSTGRES_PORT=55432 make migrate-up
+APP_LISTEN_PORT=18080 DB_LISTEN_PORT=55432 make start
+DB_LISTEN_PORT=55432 make migrate-up
 ```
 
 You can inspect the derived value with:
@@ -153,6 +152,47 @@ Structured error responses use this shape:
 - `interested_in_testing`: optional boolean
 - `message`: optional
 
+### `POST /public/visitor-count`
+
+Records a visit for a page and returns updated counters.
+
+```json
+{
+  "page": "landing",
+  "visitor_id": "optional-visitor-id"
+}
+```
+
+Response:
+
+```json
+{
+  "page": "landing",
+  "total_visits": 1248,
+  "unique_visitors": 912
+}
+```
+
+If `visitor_id` is omitted, the total visit is still counted and the unique count is not incremented.
+
+### `GET /public/visitor-count`
+
+Returns counters for a page.
+
+```
+GET /public/visitor-count?page=landing
+```
+
+Response:
+
+```json
+{
+  "page": "landing",
+  "total_visits": 1248,
+  "unique_visitors": 912
+}
+```
+
 ### Example Waitlist Request
 
 ```sh
@@ -194,6 +234,7 @@ CORS is applied only to `/public/*` routes.
 - Allowed origins are configured with `PUBLIC_CORS_ALLOWED_ORIGINS`.
 - Allowed origins receive `Access-Control-Allow-Origin`.
 - Disallowed origins do not receive `Access-Control-Allow-Origin`.
+- `GET`, `POST`, and `OPTIONS` are allowed for `/public/visitor-count`.
 - `POST` and `OPTIONS` are allowed for `/public/early-access`.
 - `Content-Type` is allowed.
 - Wildcard origins are not used.
@@ -244,18 +285,24 @@ docker compose up --build
 
 This starts:
 
-- `postgres` on port `5432` by default
-- `app` on host port `8080` by default
+- `postgres` on port from `DB_LISTEN_PORT` by default (`5432`)
+- `app` on host port from `APP_LISTEN_PORT` by default (`8080`)
 
 Run the migration after the database is ready.
 
 If ports are already in use locally, override the published host ports:
 
 ```sh
-APP_PORT=18080 POSTGRES_PORT=55432 docker compose up --build
+APP_LISTEN_PORT=18080 DB_LISTEN_PORT=55432 make start
 ```
 
-The same `POSTGRES_PORT` value can be reused with `make migrate-up`, `make migrate-down`, and `make run`.
+The same `DB_LISTEN_PORT` value can be reused with `make migrate-up`, `make migrate-down`, and `make run`.
+
+You can also run compose + migrations in one command:
+
+```sh
+make up-with-migrations
+```
 
 ## Test Commands
 
