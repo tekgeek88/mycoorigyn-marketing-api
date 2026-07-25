@@ -13,6 +13,7 @@ import (
 
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/config"
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/httpapi"
+	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/pageviews"
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/postgres"
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/submissions"
 )
@@ -43,8 +44,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	service := submissions.NewService(postgres.NewStore(pool), submissions.ServiceOptions{})
-	handler := httpapi.NewServer(service, httpapi.Options{
+	store := postgres.NewStore(pool)
+	service := submissions.NewService(store, submissions.ServiceOptions{})
+	pageViewService := pageviews.NewService(store, pageviews.ServiceOptions{})
+	handler := httpapi.NewServer(service, pageViewService, httpapi.Options{
 		CORSAllowedOrigins: cfg.PublicCORSAllowedOrigins,
 		Logger:             logger,
 	})

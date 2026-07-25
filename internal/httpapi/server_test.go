@@ -13,12 +13,19 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/pageviews"
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/submissions"
 )
 
 type storedSubmission struct {
 	submission submissions.Submission
 	createdAt  time.Time
+}
+
+type fakePageViews struct {
+	mu       sync.Mutex
+	counts   map[string]pageviews.VisitorCounter
+	visitors map[string]map[string]struct{}
 }
 
 type fakeRepository struct {
@@ -66,20 +73,81 @@ func (f *fakeRepository) last() submissions.Submission {
 	return f.submissions[len(f.submissions)-1].submission
 }
 
-func testServer(t *testing.T, origins []string) (*gin.Engine, *fakeRepository) {
+func (f *fakePageViews) Record(_ context.Context, req pageviews.RecordPageViewRequest) (pageviews.VisitorCounter, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	page := req.Page
+	if page == "" {
+		page = "landing"
+	}
+
+	if f.counts == nil {
+		f.counts = make(map[string]pageviews.VisitorCounter)
+	}
+	if f.visitors == nil {
+		f.visitors = make(map[string]map[string]struct{})
+	}
+
+	count := f.counts[page]
+	count.Page = page
+	count.TotalVisits++
+
+	visitorID := req.VisitorID
+	if visitorID != "" {
+		visitorIDs, ok := f.visitors[page]
+		if !ok {
+			visitorIDs = make(map[string]struct{})
+			f.visitors[page] = visitorIDs
+		}
+
+		if _, seen := visitorIDs[visitorID]; !seen {
+			count.UniqueVisitors++
+			visitorIDs[visitorID] = struct{}{}
+		}
+	}
+
+	f.counts[page] = count
+	return count, nil
+}
+
+func (f *fakePageViews) Get(_ context.Context, pagePath string) (pageviews.VisitorCounter, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if pagePath == "" {
+		pagePath = "landing"
+	}
+	count, ok := f.counts[pagePath]
+	if !ok {
+		return pageviews.VisitorCounter{Page: pagePath}, nil
+	}
+	count.Page = pagePath
+	return count, nil
+}
+
+func newFakePageViews() *fakePageViews {
+	return &fakePageViews{
+		counts:   make(map[string]pageviews.VisitorCounter),
+		visitors: make(map[string]map[string]struct{}),
+	}
+}
+
+func testServer(t *testing.T, origins []string) (*gin.Engine, *fakeRepository, *fakePageViews) {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
 	repo := newFakeRepository()
+	pageViews := newFakePageViews()
 	service := submissions.NewService(repo, submissions.ServiceOptions{
 		Now: func() time.Time { return repo.now },
 	})
 
-	return NewServer(service, Options{CORSAllowedOrigins: origins}), repo
+	return NewServer(service, pageViews, Options{CORSAllowedOrigins: origins}), repo, pageViews
 }
 
 func TestValidWaitlistSubmission(t *testing.T) {
-	handler, repo := testServer(t, []string{"https://mycoorigyn.com"})
+	handler, repo, _ := testServer(t, []string{"https://mycoorigyn.com"})
 
 	resp := postJSON(t, handler, map[string]any{
 		"submission_type": "waitlist",
@@ -109,7 +177,7 @@ func TestValidWaitlistSubmission(t *testing.T) {
 }
 
 func TestValidEarlyAccessSubmission(t *testing.T) {
-	handler, repo := testServer(t, nil)
+	handler, repo, _ := testServer(t, nil)
 	testingInterest := true
 
 	resp := postJSON(t, handler, map[string]any{
@@ -150,7 +218,7 @@ func TestValidEarlyAccessSubmission(t *testing.T) {
 }
 
 func TestMissingEmail(t *testing.T) {
-	handler, _ := testServer(t, nil)
+	handler, _, _ := testServer(t, nil)
 
 	resp := postJSON(t, handler, map[string]any{
 		"submission_type": "waitlist",
@@ -161,7 +229,7 @@ func TestMissingEmail(t *testing.T) {
 }
 
 func TestInvalidEmail(t *testing.T) {
-	handler, _ := testServer(t, nil)
+	handler, _, _ := testServer(t, nil)
 
 	resp := postJSON(t, handler, map[string]any{
 		"submission_type": "waitlist",
@@ -173,7 +241,7 @@ func TestInvalidEmail(t *testing.T) {
 }
 
 func TestUnsupportedSubmissionType(t *testing.T) {
-	handler, _ := testServer(t, nil)
+	handler, _, _ := testServer(t, nil)
 
 	resp := postJSON(t, handler, map[string]any{
 		"submission_type": "demo",
@@ -185,7 +253,7 @@ func TestUnsupportedSubmissionType(t *testing.T) {
 }
 
 func TestOversizedFieldValue(t *testing.T) {
-	handler, _ := testServer(t, nil)
+	handler, _, _ := testServer(t, nil)
 
 	resp := postJSON(t, handler, map[string]any{
 		"submission_type": "waitlist",
@@ -198,7 +266,7 @@ func TestOversizedFieldValue(t *testing.T) {
 }
 
 func TestTooManyFeaturesOfInterest(t *testing.T) {
-	handler, _ := testServer(t, nil)
+	handler, _, _ := testServer(t, nil)
 
 	features := make([]string, submissions.MaxFeatureCount+1)
 	for i := range features {
@@ -216,7 +284,7 @@ func TestTooManyFeaturesOfInterest(t *testing.T) {
 }
 
 func TestOversizedFeatureLabel(t *testing.T) {
-	handler, _ := testServer(t, nil)
+	handler, _, _ := testServer(t, nil)
 
 	resp := postJSON(t, handler, map[string]any{
 		"submission_type":      "early_access",
@@ -229,7 +297,7 @@ func TestOversizedFeatureLabel(t *testing.T) {
 }
 
 func TestNonEmptyHoneypot(t *testing.T) {
-	handler, repo := testServer(t, nil)
+	handler, repo, _ := testServer(t, nil)
 
 	resp := postJSON(t, handler, map[string]any{
 		"submission_type": "waitlist",
@@ -244,7 +312,7 @@ func TestNonEmptyHoneypot(t *testing.T) {
 }
 
 func TestMalformedJSON(t *testing.T) {
-	handler, _ := testServer(t, nil)
+	handler, _, _ := testServer(t, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/public/early-access", strings.NewReader(`{"email":`))
 	req.Header.Set("Content-Type", "application/json")
@@ -255,7 +323,7 @@ func TestMalformedJSON(t *testing.T) {
 }
 
 func TestUnknownJSONField(t *testing.T) {
-	handler, _ := testServer(t, nil)
+	handler, _, _ := testServer(t, nil)
 
 	resp := postJSON(t, handler, map[string]any{
 		"submission_type": "waitlist",
@@ -268,7 +336,7 @@ func TestUnknownJSONField(t *testing.T) {
 }
 
 func TestOversizedRequestBody(t *testing.T) {
-	handler, _ := testServer(t, nil)
+	handler, _, _ := testServer(t, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/public/early-access", strings.NewReader(strings.Repeat("a", int(submissions.MaxRequestBodyBytes)+1)))
 	req.Header.Set("Content-Type", "application/json")
@@ -279,7 +347,7 @@ func TestOversizedRequestBody(t *testing.T) {
 }
 
 func TestSafeDuplicateBehavior(t *testing.T) {
-	handler, repo := testServer(t, nil)
+	handler, repo, _ := testServer(t, nil)
 	payload := map[string]any{
 		"submission_type": "waitlist",
 		"email":           "person@example.com",
@@ -298,7 +366,7 @@ func TestSafeDuplicateBehavior(t *testing.T) {
 }
 
 func TestDuplicateEmailWithDifferentPayloadAllowed(t *testing.T) {
-	handler, repo := testServer(t, nil)
+	handler, repo, _ := testServer(t, nil)
 
 	first := postJSON(t, handler, map[string]any{
 		"submission_type": "waitlist",
@@ -322,7 +390,7 @@ func TestDuplicateEmailWithDifferentPayloadAllowed(t *testing.T) {
 }
 
 func TestWaitlistThenEarlyAccessAllowed(t *testing.T) {
-	handler, repo := testServer(t, nil)
+	handler, repo, _ := testServer(t, nil)
 
 	first := postJSON(t, handler, map[string]any{
 		"submission_type": "waitlist",
@@ -344,8 +412,61 @@ func TestWaitlistThenEarlyAccessAllowed(t *testing.T) {
 	}
 }
 
+func TestVisitorCountIncrementsAndDedupesByVisitor(t *testing.T) {
+	handler, _, _ := testServer(t, nil)
+
+	first := postJSONToEndpoint(t, handler, "/public/visitor-count", map[string]any{
+		"page":       "landing",
+		"visitor_id": "visitor-1",
+	})
+	second := postJSONToEndpoint(t, handler, "/public/visitor-count", map[string]any{
+		"page":       "landing",
+		"visitor_id": "visitor-1",
+	})
+	third := postJSONToEndpoint(t, handler, "/public/visitor-count", map[string]any{
+		"page":       "landing",
+		"visitor_id": "visitor-2",
+	})
+
+	if first.Code != http.StatusOK || second.Code != http.StatusOK || third.Code != http.StatusOK {
+		t.Fatalf("statuses = %d, %d, %d", first.Code, second.Code, third.Code)
+	}
+
+	if got := parseVisitorCounter(t, first.Body.Bytes()); got.TotalVisits != 1 || got.UniqueVisitors != 1 {
+		t.Fatalf("first response = %#v", got)
+	}
+
+	if got := parseVisitorCounter(t, second.Body.Bytes()); got.TotalVisits != 2 || got.UniqueVisitors != 1 {
+		t.Fatalf("second response = %#v", got)
+	}
+
+	if got := parseVisitorCounter(t, third.Body.Bytes()); got.TotalVisits != 3 || got.UniqueVisitors != 2 {
+		t.Fatalf("third response = %#v", got)
+	}
+
+}
+
+func TestGetVisitorCountFromStoredCounts(t *testing.T) {
+	handler, _, _ := testServer(t, nil)
+
+	postJSONToEndpoint(t, handler, "/public/visitor-count", map[string]any{
+		"page":       "landing",
+		"visitor_id": "visitor-1",
+	})
+
+	resp := getJSON(t, handler, "/public/visitor-count?page=landing")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+
+	got := parseVisitorCounter(t, resp.Body.Bytes())
+	if got.TotalVisits != 1 || got.UniqueVisitors != 1 {
+		t.Fatalf("visitor-count = %#v", got)
+	}
+}
+
 func TestPublicRouteRequiresNoAuth(t *testing.T) {
-	handler, _ := testServer(t, nil)
+	handler, _, _ := testServer(t, nil)
 
 	resp := postJSON(t, handler, map[string]any{
 		"submission_type": "waitlist",
@@ -359,7 +480,7 @@ func TestPublicRouteRequiresNoAuth(t *testing.T) {
 }
 
 func TestCORSPreflightAllowedOrigin(t *testing.T) {
-	handler, _ := testServer(t, []string{"https://mycoorigyn.com"})
+	handler, _, _ := testServer(t, []string{"https://mycoorigyn.com"})
 
 	req := httptest.NewRequest(http.MethodOptions, "/public/early-access", nil)
 	req.Header.Set("Origin", "https://mycoorigyn.com")
@@ -379,7 +500,7 @@ func TestCORSPreflightAllowedOrigin(t *testing.T) {
 }
 
 func TestCORSPreflightDisallowedOrigin(t *testing.T) {
-	handler, _ := testServer(t, []string{"https://mycoorigyn.com"})
+	handler, _, _ := testServer(t, []string{"https://mycoorigyn.com"})
 
 	req := httptest.NewRequest(http.MethodOptions, "/public/early-access", nil)
 	req.Header.Set("Origin", "https://example.com")
@@ -395,8 +516,25 @@ func TestCORSPreflightDisallowedOrigin(t *testing.T) {
 	}
 }
 
+func TestCORSPreflightVisitorCountAllowsGetAndPost(t *testing.T) {
+	handler, _, _ := testServer(t, []string{"https://mycoorigyn.com"})
+
+	req := httptest.NewRequest(http.MethodOptions, "/public/visitor-count", nil)
+	req.Header.Set("Origin", "https://mycoorigyn.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusNoContent)
+	}
+	if got := resp.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, http.MethodGet) {
+		t.Fatalf("allow methods = %q", got)
+	}
+}
+
 func TestHealthzReturnsOK(t *testing.T) {
-	handler, _ := testServer(t, nil)
+	handler, _, _ := testServer(t, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	resp := httptest.NewRecorder()
@@ -416,7 +554,7 @@ func TestHealthzReturnsOK(t *testing.T) {
 }
 
 func TestErrorResponseShapeIsStructured(t *testing.T) {
-	handler, _ := testServer(t, nil)
+	handler, _, _ := testServer(t, nil)
 
 	resp := postJSON(t, handler, map[string]any{
 		"submission_type": "waitlist",
@@ -442,6 +580,10 @@ func TestErrorResponseShapeIsStructured(t *testing.T) {
 }
 
 func postJSON(t *testing.T, handler http.Handler, payload any) *httptest.ResponseRecorder {
+	return postJSONToEndpoint(t, handler, "/public/early-access", payload)
+}
+
+func postJSONToEndpoint(t *testing.T, handler http.Handler, path string, payload any) *httptest.ResponseRecorder {
 	t.Helper()
 
 	body, err := json.Marshal(payload)
@@ -449,11 +591,30 @@ func postJSON(t *testing.T, handler http.Handler, payload any) *httptest.Respons
 		t.Fatal(err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/public/early-access", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
 	return resp
+}
+
+func getJSON(t *testing.T, handler http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	return resp
+}
+
+func parseVisitorCounter(t *testing.T, body []byte) pageviews.VisitorCounter {
+	t.Helper()
+
+	var payload pageviews.VisitorCounter
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode visitor counter response: %v", err)
+	}
+	return payload
 }
 
 func assertSuccess(t *testing.T, body []byte) {
