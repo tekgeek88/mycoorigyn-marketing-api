@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/approvals"
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/pageviews"
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/submissions"
 )
@@ -19,6 +22,8 @@ import (
 type Options struct {
 	CORSAllowedOrigins []string
 	Logger             *slog.Logger
+	Approvals          *approvals.Service
+	ProvisioningSecret []byte
 }
 
 func NewServer(service submissions.Service, pageViews pageviews.CounterService, opts Options) *gin.Engine {
@@ -30,6 +35,8 @@ func NewServer(service submissions.Service, pageViews pageviews.CounterService, 
 	server := &server{
 		service:            service,
 		pageViews:          pageViews,
+		approvals:          opts.Approvals,
+		provisioningSecret: append([]byte(nil), opts.ProvisioningSecret...),
 		logger:             logger,
 		corsAllowedOrigins: map[string]struct{}{},
 	}
@@ -53,9 +60,22 @@ func NewServer(service submissions.Service, pageViews pageviews.CounterService, 
 	public.Use(publicCORS(server.corsAllowedOrigins), limitRequestBody(submissions.MaxRequestBodyBytes))
 	public.POST("/early-access", server.earlyAccess)
 	public.OPTIONS("/early-access", server.earlyAccessOptions)
+	public.POST("/early-access/review/resolve", server.resolveReview)
+	public.POST("/early-access/review/approve", server.approveReview)
+	public.POST("/early-access/review/decline", server.declineReview)
+	public.OPTIONS("/early-access/review/resolve", server.publicOptions)
+	public.OPTIONS("/early-access/review/approve", server.publicOptions)
+	public.OPTIONS("/early-access/review/decline", server.publicOptions)
 	public.POST("/visitor-count", server.recordVisitorCount)
 	public.GET("/visitor-count", server.getVisitorCount)
 	public.OPTIONS("/visitor-count", server.publicOptions)
+
+	internal := router.Group("/internal")
+	internal.Use(limitRequestBody(submissions.MaxRequestBodyBytes), requireServiceAuthentication(server.provisioningSecret))
+	internal.POST("/signup-grants/validate", server.validateSignupGrant)
+	internal.POST("/signup-grants/claim", server.claimSignupGrant)
+	internal.POST("/signup-grants/consume", server.consumeSignupGrant)
+	internal.POST("/signup-grants/release", server.releaseSignupGrant)
 
 	return router
 }
@@ -63,6 +83,8 @@ func NewServer(service submissions.Service, pageViews pageviews.CounterService, 
 type server struct {
 	service            submissions.Service
 	pageViews          pageviews.CounterService
+	approvals          *approvals.Service
+	provisioningSecret []byte
 	logger             *slog.Logger
 	corsAllowedOrigins map[string]struct{}
 }
@@ -85,6 +107,16 @@ type earlyAccessRequest struct {
 type visitorCountRequest struct {
 	Page      string `json:"page"`
 	VisitorID string `json:"visitor_id"`
+}
+
+type capabilityRequest struct {
+	Token string `json:"token"`
+}
+
+type signupGrantRequest struct {
+	Token          string `json:"token"`
+	Email          string `json:"email"`
+	ClaimReference string `json:"claim_reference,omitempty"`
 }
 
 func (s *server) healthz(c *gin.Context) {
@@ -128,6 +160,144 @@ func (s *server) earlyAccess(c *gin.Context) {
 		"success": true,
 		"message": "Thank you for your interest in MycoOrigyn.",
 	})
+}
+
+func (s *server) resolveReview(c *gin.Context) {
+	if s.approvals == nil {
+		writeError(c, http.StatusServiceUnavailable, "service_unavailable", "Review is temporarily unavailable.")
+		return
+	}
+	var req capabilityRequest
+	if err := decodeRequestBody(c, &req); err != nil {
+		s.writeDecodeError(c, err)
+		return
+	}
+	application, err := s.approvals.Resolve(c.Request.Context(), req.Token)
+	if err != nil {
+		s.writeApprovalError(c, err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, application)
+}
+
+func (s *server) approveReview(c *gin.Context) {
+	if s.approvals == nil {
+		writeError(c, http.StatusServiceUnavailable, "service_unavailable", "Review is temporarily unavailable.")
+		return
+	}
+	var req capabilityRequest
+	if err := decodeRequestBody(c, &req); err != nil {
+		s.writeDecodeError(c, err)
+		return
+	}
+	result, err := s.approvals.Approve(c.Request.Context(), req.Token)
+	if errors.Is(err, approvals.ErrDeliveryFailed) {
+		writeError(c, http.StatusServiceUnavailable, "approval_delivery_failed", "Approval was saved, but email delivery failed. Retry the same approval.")
+		return
+	}
+	if err != nil {
+		s.writeApprovalError(c, err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, result)
+}
+
+func (s *server) declineReview(c *gin.Context) {
+	if s.approvals == nil {
+		writeError(c, http.StatusServiceUnavailable, "service_unavailable", "Review is temporarily unavailable.")
+		return
+	}
+	var req capabilityRequest
+	if err := decodeRequestBody(c, &req); err != nil {
+		s.writeDecodeError(c, err)
+		return
+	}
+	if err := s.approvals.Decline(c.Request.Context(), req.Token); err != nil {
+		s.writeApprovalError(c, err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, gin.H{"status": "declined"})
+}
+
+func (s *server) validateSignupGrant(c *gin.Context) {
+	s.handleGrantOperation(c, "validate")
+}
+
+func (s *server) claimSignupGrant(c *gin.Context) {
+	s.handleGrantOperation(c, "claim")
+}
+
+func (s *server) consumeSignupGrant(c *gin.Context) {
+	s.handleGrantOperation(c, "consume")
+}
+
+func (s *server) releaseSignupGrant(c *gin.Context) {
+	s.handleGrantOperation(c, "release")
+}
+
+func (s *server) handleGrantOperation(c *gin.Context, operation string) {
+	if s.approvals == nil {
+		writeError(c, http.StatusServiceUnavailable, "service_unavailable", "Signup grants are temporarily unavailable.")
+		return
+	}
+	var req signupGrantRequest
+	if err := decodeRequestBody(c, &req); err != nil {
+		s.writeDecodeError(c, err)
+		return
+	}
+	var (
+		grant approvals.Grant
+		err   error
+	)
+	switch operation {
+	case "validate":
+		grant, err = s.approvals.ValidateGrant(c.Request.Context(), req.Token, req.Email)
+	case "claim":
+		grant, err = s.approvals.ClaimGrant(c.Request.Context(), req.Token, req.Email, req.ClaimReference)
+	case "consume":
+		grant, err = s.approvals.ConsumeGrant(c.Request.Context(), req.Token, req.Email, req.ClaimReference)
+	case "release":
+		grant, err = s.approvals.ReleaseGrant(c.Request.Context(), req.Token, req.Email, req.ClaimReference)
+	}
+	if err != nil {
+		s.writeGrantError(c, err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, grant)
+}
+
+func (s *server) writeApprovalError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, approvals.ErrInvalidReview):
+		writeError(c, http.StatusNotFound, "review_not_found", "This review link is invalid or no longer available.")
+	case errors.Is(err, approvals.ErrReviewExpired):
+		writeError(c, http.StatusGone, "review_expired", "This review link has expired.")
+	case errors.Is(err, approvals.ErrDecisionConflict):
+		writeError(c, http.StatusConflict, "review_conflict", "This request has already received a different decision.")
+	default:
+		s.logger.Error("early access review operation failed", "route", c.FullPath())
+		writeError(c, http.StatusInternalServerError, "internal_error", "Something went wrong. Please try again later.")
+	}
+}
+
+func (s *server) writeGrantError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, approvals.ErrInvalidGrant), errors.Is(err, approvals.ErrInvalidInput):
+		writeError(c, http.StatusNotFound, "signup_grant_not_found", "The signup grant is invalid or unavailable.")
+	case errors.Is(err, approvals.ErrGrantExpired):
+		writeError(c, http.StatusGone, "signup_grant_expired", "The signup grant has expired.")
+	case errors.Is(err, approvals.ErrGrantClaimed):
+		writeError(c, http.StatusConflict, "signup_grant_claimed", "The signup grant is already claimed by another operation.")
+	case errors.Is(err, approvals.ErrInvalidClaim):
+		writeError(c, http.StatusConflict, "signup_grant_claim_conflict", "The signup grant claim does not match.")
+	default:
+		s.logger.Error("signup grant operation failed", "route", c.FullPath())
+		writeError(c, http.StatusInternalServerError, "internal_error", "Something went wrong. Please try again later.")
+	}
 }
 
 func (s *server) recordVisitorCount(c *gin.Context) {
@@ -305,4 +475,23 @@ func writeError(c *gin.Context, status int, code, message string) {
 			"message": message,
 		},
 	})
+}
+
+func requireServiceAuthentication(expected []byte) gin.HandlerFunc {
+	expectedDigest := sha256.Sum256(expected)
+	configured := len(expected) >= 32
+	return func(c *gin.Context) {
+		if !configured {
+			writeError(c, http.StatusServiceUnavailable, "service_unavailable", "Provisioning authorization is unavailable.")
+			return
+		}
+		header := c.GetHeader("Authorization")
+		provided, ok := strings.CutPrefix(header, "Bearer ")
+		providedDigest := sha256.Sum256([]byte(provided))
+		if !ok || provided == "" || subtle.ConstantTimeCompare(expectedDigest[:], providedDigest[:]) != 1 {
+			writeError(c, http.StatusUnauthorized, "service_authentication_required", "Service authentication is required.")
+			return
+		}
+		c.Next()
+	}
 }
