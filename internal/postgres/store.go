@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -20,22 +21,12 @@ func NewStore(pool *pgxpool.Pool) Store {
 	return Store{pool: pool}
 }
 
-func (s Store) HasRecentFingerprint(ctx context.Context, fingerprint string, since time.Time) (bool, error) {
-	var exists bool
-	err := s.pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM early_access_submissions
-			WHERE payload_fingerprint = $1
-			  AND created_at >= $2
-		)
-	`, fingerprint, since).Scan(&exists)
-	return exists, err
-}
-
-func (s Store) CreateEarlyAccessSubmission(ctx context.Context, submission submissions.Submission) error {
+func (s Store) CreateSubmission(ctx context.Context, submission submissions.Submission, duplicateSince time.Time, review *submissions.ReviewCapability) (submissions.CreateResult, error) {
 	if err := submissions.ValidateStoredStatus(submission.Status); err != nil {
-		return err
+		return submissions.CreateResult{}, err
+	}
+	if (submission.SubmissionType == submissions.TypeEarlyAccess) != (review != nil) {
+		return submissions.CreateResult{}, errors.New("review capability must exist only for early-access submissions")
 	}
 
 	var features []string
@@ -43,7 +34,41 @@ func (s Store) CreateEarlyAccessSubmission(ctx context.Context, submission submi
 		features = append([]string(nil), submission.FeaturesOfInterest...)
 	}
 
-	_, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return submissions.CreateResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, submission.PayloadFingerprint); err != nil {
+		return submissions.CreateResult{}, err
+	}
+
+	var existingID string
+	err = tx.QueryRow(ctx, `
+		SELECT id::text
+		FROM early_access_submissions
+		WHERE payload_fingerprint = $1
+		  AND created_at >= $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, submission.PayloadFingerprint, duplicateSince).Scan(&existingID)
+	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return submissions.CreateResult{}, err
+		}
+		return submissions.CreateResult{SubmissionID: existingID, Created: false}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return submissions.CreateResult{}, err
+	}
+
+	var approvalStatus any
+	if submission.SubmissionType == submissions.TypeEarlyAccess {
+		approvalStatus = "pending"
+	}
+	var submissionID string
+	err = tx.QueryRow(ctx, `
 		INSERT INTO early_access_submissions (
 			submission_type,
 			email,
@@ -57,7 +82,8 @@ func (s Store) CreateEarlyAccessSubmission(ctx context.Context, submission submi
 			message,
 			source,
 			status,
-			payload_fingerprint
+			payload_fingerprint,
+			approval_status
 		) VALUES (
 			$1,
 			$2,
@@ -71,8 +97,10 @@ func (s Store) CreateEarlyAccessSubmission(ctx context.Context, submission submi
 			$10,
 			$11,
 			$12,
-			$13
+			$13,
+			$14
 		)
+		RETURNING id::text
 	`,
 		submission.SubmissionType,
 		submission.Email,
@@ -87,8 +115,29 @@ func (s Store) CreateEarlyAccessSubmission(ctx context.Context, submission submi
 		submission.Source,
 		submission.Status,
 		submission.PayloadFingerprint,
-	)
-	return err
+		approvalStatus,
+	).Scan(&submissionID)
+	if err != nil {
+		return submissions.CreateResult{}, err
+	}
+
+	if review != nil {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO early_access_review_capabilities (
+				early_access_submission_id,
+				token_digest,
+				secret_reference,
+				expires_at
+			) VALUES ($1::uuid, $2, $3, $4)
+		`, submissionID, review.TokenDigest, review.SecretReference, review.ExpiresAt); err != nil {
+			return submissions.CreateResult{}, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return submissions.CreateResult{}, err
+	}
+	return submissions.CreateResult{SubmissionID: submissionID, Created: true}, nil
 }
 
 func (s Store) RecordVisit(ctx context.Context, pagePath string, visitorID string) (pageviews.VisitorCounter, error) {

@@ -7,10 +7,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
+	"log/slog"
 	"net/mail"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/securetokens"
+	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/transactionalemail"
 )
 
 const (
@@ -43,19 +49,45 @@ var allowedStatuses = map[string]struct{}{
 }
 
 type Repository interface {
-	HasRecentFingerprint(ctx context.Context, fingerprint string, since time.Time) (bool, error)
-	CreateEarlyAccessSubmission(ctx context.Context, submission Submission) error
+	CreateSubmission(ctx context.Context, submission Submission, duplicateSince time.Time, review *ReviewCapability) (CreateResult, error)
 }
 
 type Service struct {
 	repo            Repository
 	now             func() time.Time
 	duplicateWindow time.Duration
+	reviewLifetime  time.Duration
+	tokens          securetokens.Store
+	email           transactionalemail.Sender
+	emailFrom       string
+	emailReplyTo    string
+	reviewerEmail   string
+	reviewBaseURL   string
+	logger          *slog.Logger
 }
 
 type ServiceOptions struct {
 	Now             func() time.Time
 	DuplicateWindow time.Duration
+	ReviewLifetime  time.Duration
+	Tokens          securetokens.Store
+	Email           transactionalemail.Sender
+	EmailFrom       string
+	EmailReplyTo    string
+	ReviewerEmail   string
+	ReviewBaseURL   string
+	Logger          *slog.Logger
+}
+
+type ReviewCapability struct {
+	TokenDigest     []byte
+	SecretReference string
+	ExpiresAt       time.Time
+}
+
+type CreateResult struct {
+	SubmissionID string
+	Created      bool
 }
 
 type SubmissionInput struct {
@@ -109,10 +141,26 @@ func NewService(repo Repository, opts ServiceOptions) Service {
 	if window <= 0 {
 		window = 24 * time.Hour
 	}
+	reviewLifetime := opts.ReviewLifetime
+	if reviewLifetime <= 0 {
+		reviewLifetime = 7 * 24 * time.Hour
+	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(ioDiscard{}, nil))
+	}
 	return Service{
 		repo:            repo,
 		now:             now,
 		duplicateWindow: window,
+		reviewLifetime:  reviewLifetime,
+		tokens:          opts.Tokens,
+		email:           opts.Email,
+		emailFrom:       strings.TrimSpace(opts.EmailFrom),
+		emailReplyTo:    strings.TrimSpace(opts.EmailReplyTo),
+		reviewerEmail:   strings.TrimSpace(opts.ReviewerEmail),
+		reviewBaseURL:   strings.TrimRight(strings.TrimSpace(opts.ReviewBaseURL), "/"),
+		logger:          logger,
 	}
 }
 
@@ -122,16 +170,98 @@ func (s Service) Submit(ctx context.Context, input SubmissionInput) error {
 		return err
 	}
 
-	duplicate, err := s.repo.HasRecentFingerprint(ctx, submission.PayloadFingerprint, s.now().Add(-s.duplicateWindow))
+	var review *ReviewCapability
+	var reviewToken string
+	if submission.SubmissionType == TypeEarlyAccess {
+		if s.tokens == nil {
+			return errors.New("protected review token store is unavailable")
+		}
+		token, digest, err := securetokens.Generate()
+		if err != nil {
+			return err
+		}
+		reference, err := s.tokens.Put(ctx, "review", digest, token)
+		if err != nil {
+			return err
+		}
+		reviewToken = token
+		review = &ReviewCapability{
+			TokenDigest:     digest,
+			SecretReference: reference,
+			ExpiresAt:       s.now().Add(s.reviewLifetime),
+		}
+	}
+
+	result, err := s.repo.CreateSubmission(ctx, submission, s.now().Add(-s.duplicateWindow), review)
 	if err != nil {
+		if review != nil {
+			_ = s.tokens.Delete(ctx, review.SecretReference)
+		}
 		return err
 	}
-	if duplicate {
+	if !result.Created {
+		if review != nil {
+			_ = s.tokens.Delete(ctx, review.SecretReference)
+		}
+		return nil
+	}
+	if review == nil {
 		return nil
 	}
 
-	return s.repo.CreateEarlyAccessSubmission(ctx, submission)
+	if err := s.sendReviewerNotification(ctx, submission, reviewToken, review.ExpiresAt); err != nil {
+		s.logger.Warn("early_access_review_notification_failed",
+			"submission_id", result.SubmissionID,
+			"outcome", "delivery_failed",
+		)
+	}
+	return nil
 }
+
+func (s Service) sendReviewerNotification(ctx context.Context, submission Submission, token string, expiresAt time.Time) error {
+	if s.email == nil || s.emailFrom == "" || s.reviewerEmail == "" || s.reviewBaseURL == "" {
+		return errors.New("review notification is not configured")
+	}
+	reviewURL := s.reviewBaseURL + "#token=" + url.PathEscape(token)
+	textBody := fmt.Sprintf(
+		"A new MycoOrigyn early-access request is ready for review.\n\nName: %s\nEmail: %s\nFarm name: %s\nFarm type: %s\nProduction scale: %s\nCurrent tracking method: %s\nInterested in testing: %s\nMessage: %s\n\nReview Early Access Request:\n%s\n\nThis review link expires %s.\n",
+		fallback(submission.Name), submission.Email, fallback(submission.FarmName), fallback(submission.FarmType),
+		fallback(submission.ProductionScale), fallback(submission.CurrentTrackingMethod), boolLabel(submission.InterestedInTesting),
+		fallback(submission.Message), reviewURL, expiresAt.UTC().Format(time.RFC3339),
+	)
+	htmlBody := fmt.Sprintf(
+		"<h1>New MycoOrigyn early-access request</h1><dl><dt>Name</dt><dd>%s</dd><dt>Email</dt><dd>%s</dd><dt>Farm name</dt><dd>%s</dd><dt>Farm type</dt><dd>%s</dd><dt>Production scale</dt><dd>%s</dd><dt>Current tracking method</dt><dd>%s</dd><dt>Interested in testing</dt><dd>%s</dd><dt>Message</dt><dd>%s</dd></dl><p><a href=\"%s\">Review Early Access Request</a></p><p>This review link expires %s.</p>",
+		html.EscapeString(fallback(submission.Name)), html.EscapeString(submission.Email), html.EscapeString(fallback(submission.FarmName)),
+		html.EscapeString(fallback(submission.FarmType)), html.EscapeString(fallback(submission.ProductionScale)),
+		html.EscapeString(fallback(submission.CurrentTrackingMethod)), html.EscapeString(boolLabel(submission.InterestedInTesting)),
+		html.EscapeString(fallback(submission.Message)), html.EscapeString(reviewURL), html.EscapeString(expiresAt.UTC().Format(time.RFC3339)),
+	)
+	return s.email.Send(ctx, transactionalemail.Message{
+		To: s.reviewerEmail, From: s.emailFrom, ReplyTo: s.emailReplyTo,
+		Subject: "New MycoOrigyn Early Access Request", Text: textBody, HTML: htmlBody,
+	})
+}
+
+func fallback(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "—"
+	}
+	return value
+}
+
+func boolLabel(value *bool) string {
+	if value == nil {
+		return "Not provided"
+	}
+	if *value {
+		return "Yes"
+	}
+	return "No"
+}
+
+type ioDiscard struct{}
+
+func (ioDiscard) Write(p []byte) (int, error) { return len(p), nil }
 
 func Normalize(input SubmissionInput) (Submission, error) {
 	input.SubmissionType = strings.TrimSpace(input.SubmissionType)
