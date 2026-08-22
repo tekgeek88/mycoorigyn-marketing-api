@@ -11,11 +11,14 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/approvals"
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/config"
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/httpapi"
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/pageviews"
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/postgres"
+	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/securetokens"
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/submissions"
+	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/transactionalemail"
 )
 
 func main() {
@@ -45,11 +48,45 @@ func main() {
 	}
 
 	store := postgres.NewStore(pool)
-	service := submissions.NewService(store, submissions.ServiceOptions{})
+	tokenStore, err := securetokens.NewFileStore(cfg.TokenSecretRoot)
+	if err != nil {
+		logger.Error("initialize protected token store", "error", err)
+		os.Exit(1)
+	}
+	var emailSender transactionalemail.Sender = transactionalemail.DisabledSender{}
+	if cfg.EmailProvider == "resend" {
+		emailSender, err = transactionalemail.NewResendSender(cfg.ResendAPIKeyFile, "", cfg.WriteTimeout)
+		if err != nil {
+			logger.Error("initialize transactional email", "error", err)
+			os.Exit(1)
+		}
+	}
+	service := submissions.NewService(store, submissions.ServiceOptions{
+		ReviewLifetime: cfg.ReviewLifetime,
+		Tokens:         tokenStore,
+		Email:          emailSender,
+		EmailFrom:      cfg.EmailFrom,
+		EmailReplyTo:   cfg.EmailReplyTo,
+		ReviewerEmail:  cfg.ReviewRecipient,
+		ReviewBaseURL:  cfg.ReviewBaseURL,
+		Logger:         logger,
+	})
+	approvalService := approvals.NewService(store, approvals.ServiceOptions{
+		Tokens:        tokenStore,
+		Email:         emailSender,
+		From:          cfg.EmailFrom,
+		ReplyTo:       cfg.EmailReplyTo,
+		SignupBaseURL: cfg.HostedSignupBaseURL,
+		GrantLifetime: cfg.GrantLifetime,
+		ClaimLifetime: cfg.ClaimLifetime,
+		Logger:        logger,
+	})
 	pageViewService := pageviews.NewService(store, pageviews.ServiceOptions{})
 	handler := httpapi.NewServer(service, pageViewService, httpapi.Options{
 		CORSAllowedOrigins: cfg.PublicCORSAllowedOrigins,
 		Logger:             logger,
+		Approvals:          &approvalService,
+		ProvisioningSecret: cfg.ProvisioningSecret,
 	})
 
 	server := &http.Server{

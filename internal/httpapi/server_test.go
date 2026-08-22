@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,7 +15,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/pageviews"
+	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/securetokens"
 	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/submissions"
+	"github.com/mycoorigyn/mycoorigyn-marketing-api/internal/transactionalemail"
 )
 
 type storedSubmission struct {
@@ -48,6 +51,18 @@ func (f *fakeRepository) HasRecentFingerprint(_ context.Context, fingerprint str
 		}
 	}
 	return false, nil
+}
+
+func (f *fakeRepository) CreateSubmission(_ context.Context, submission submissions.Submission, since time.Time, _ *submissions.ReviewCapability) (submissions.CreateResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, item := range f.submissions {
+		if item.submission.PayloadFingerprint == submission.PayloadFingerprint && !item.createdAt.Before(since) {
+			return submissions.CreateResult{SubmissionID: fmt.Sprintf("submission-%d", i+1), Created: false}, nil
+		}
+	}
+	f.submissions = append(f.submissions, storedSubmission{submission: submission, createdAt: f.now})
+	return submissions.CreateResult{SubmissionID: fmt.Sprintf("submission-%d", len(f.submissions)), Created: true}, nil
 }
 
 func (f *fakeRepository) CreateEarlyAccessSubmission(_ context.Context, submission submissions.Submission) error {
@@ -140,7 +155,12 @@ func testServer(t *testing.T, origins []string) (*gin.Engine, *fakeRepository, *
 	repo := newFakeRepository()
 	pageViews := newFakePageViews()
 	service := submissions.NewService(repo, submissions.ServiceOptions{
-		Now: func() time.Time { return repo.now },
+		Now:           func() time.Time { return repo.now },
+		Tokens:        securetokens.NewMemoryStore(),
+		Email:         &transactionalemail.MemorySender{},
+		EmailFrom:     "MycoOrigyn <notify@example.com>",
+		ReviewerEmail: "reviewer@example.com",
+		ReviewBaseURL: "https://mycoorigyn.com/early-access/review",
 	})
 
 	return NewServer(service, pageViews, Options{CORSAllowedOrigins: origins}), repo, pageViews
