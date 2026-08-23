@@ -77,7 +77,10 @@ func (f *fakeRepository) Approve(_ context.Context, digest []byte, candidate Gra
 		FarmName: f.application.FarmName, TokenDigest: append([]byte(nil), candidate.TokenDigest...),
 		SecretReference: candidate.SecretReference, ExpiresAt: candidate.ExpiresAt,
 	}
-	f.grant = Grant{ID: "grant-1", ApprovedEmail: f.application.Email, Source: GrantSourceEarlyAccess, Status: "active", ExpiresAt: candidate.ExpiresAt}
+	f.grant = Grant{
+		ID: "grant-1", ApprovedEmail: f.application.Email, Source: GrantSourceEarlyAccess,
+		Status: "active", ExpiresAt: candidate.ExpiresAt, SecretReference: candidate.SecretReference,
+	}
 	return *f.approval, true, nil
 }
 
@@ -131,11 +134,20 @@ func (f *fakeRepository) ClaimGrant(ctx context.Context, digest []byte, email st
 func (f *fakeRepository) ConsumeGrant(_ context.Context, digest []byte, email string, claimDigest []byte, now time.Time) (Grant, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.approval == nil || subtle.ConstantTimeCompare(digest, f.approval.TokenDigest) != 1 || email != f.grant.ApprovedEmail ||
-		f.grant.Status != "claimed" || subtle.ConstantTimeCompare(f.claimDigest, claimDigest) != 1 || !now.Before(f.grant.ClaimExpiresAt) {
+	if f.approval == nil || subtle.ConstantTimeCompare(digest, f.approval.TokenDigest) != 1 || email != f.grant.ApprovedEmail {
+		return Grant{}, ErrInvalidClaim
+	}
+	if f.grant.Status == "consumed" {
+		if subtle.ConstantTimeCompare(f.claimDigest, claimDigest) != 1 {
+			return Grant{}, ErrInvalidClaim
+		}
+		return f.grant, nil
+	}
+	if f.grant.Status != "claimed" || subtle.ConstantTimeCompare(f.claimDigest, claimDigest) != 1 || !now.Before(f.grant.ClaimExpiresAt) {
 		return Grant{}, ErrInvalidClaim
 	}
 	f.grant.Status = "consumed"
+	f.grant.ClaimExpiresAt = time.Time{}
 	return f.grant, nil
 }
 
@@ -250,6 +262,56 @@ func TestGrantClaimReleaseConsumeContract(t *testing.T) {
 	}
 	if _, err := service.ValidateGrant(context.Background(), token, "owner@example.com"); !errors.Is(err, ErrInvalidGrant) {
 		t.Fatalf("consumed grant validated: %v", err)
+	}
+}
+
+func TestConsumeGrantReplayReconcilesResponseLossAndTokenCleanup(t *testing.T) {
+	repo, reviewToken, initialNow := newApprovalFixture(t)
+	now := initialNow
+	tokens := securetokens.NewMemoryStore()
+	service := NewService(repo, ServiceOptions{
+		Tokens: tokens, Email: &transactionalemail.MemorySender{}, From: "notify@example.com",
+		SignupBaseURL: "https://app.example.com/signup", Now: func() time.Time { return now }, ClaimLifetime: time.Minute,
+	})
+	if _, err := service.Approve(context.Background(), reviewToken); err != nil {
+		t.Fatal(err)
+	}
+	token, err := tokens.Read(context.Background(), repo.approval.SecretReference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const consumingClaim = "stable-provision-operation-a"
+	if _, err := service.ClaimGrant(context.Background(), token, "owner@example.com", consumingClaim); err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.ConsumeGrant(context.Background(), token, "owner@example.com", consumingClaim)
+	if err != nil || first.Status != "consumed" {
+		t.Fatalf("first consume = %#v, err=%v", first, err)
+	}
+	if _, err := tokens.Read(context.Background(), repo.approval.SecretReference); !errors.Is(err, securetokens.ErrNotFound) {
+		t.Fatalf("protected token remained after consume: %v", err)
+	}
+
+	// Simulate a lost successful response and retry after the original claim lease expired.
+	now = initialNow.Add(2 * time.Hour)
+	second, err := service.ConsumeGrant(context.Background(), token, "owner@example.com", consumingClaim)
+	if err != nil || second.Status != "consumed" || second.ID != first.ID {
+		t.Fatalf("replayed consume = %#v, err=%v", second, err)
+	}
+	if _, err := tokens.Read(context.Background(), repo.approval.SecretReference); !errors.Is(err, securetokens.ErrNotFound) {
+		t.Fatalf("replayed cleanup recreated or required the token: %v", err)
+	}
+	if _, err := service.ConsumeGrant(context.Background(), token, "owner@example.com", "stable-provision-operation-b"); !errors.Is(err, ErrInvalidClaim) {
+		t.Fatalf("different claim replay error = %v", err)
+	}
+	if _, err := service.ValidateGrant(context.Background(), token, "owner@example.com"); !errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("consumed grant validated: %v", err)
+	}
+	if _, err := service.ClaimGrant(context.Background(), token, "owner@example.com", consumingClaim); !errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("consumed grant reclaimed: %v", err)
+	}
+	if _, err := service.ReleaseGrant(context.Background(), token, "owner@example.com", consumingClaim); !errors.Is(err, ErrInvalidClaim) {
+		t.Fatalf("consumed grant released: %v", err)
 	}
 }
 

@@ -28,6 +28,91 @@ type reviewRepository struct {
 	declineCount int
 }
 
+type consumeReplayRepository struct {
+	mu          sync.Mutex
+	tokenDigest []byte
+	claimDigest []byte
+	grant       approvals.Grant
+}
+
+func (*consumeReplayRepository) ResolveReview(context.Context, []byte, time.Time) (approvals.Application, error) {
+	return approvals.Application{}, approvals.ErrInvalidReview
+}
+
+func (*consumeReplayRepository) Approve(context.Context, []byte, approvals.GrantCandidate, time.Time) (approvals.Approval, bool, error) {
+	return approvals.Approval{}, false, approvals.ErrInvalidReview
+}
+
+func (*consumeReplayRepository) Decline(context.Context, []byte, time.Time) error {
+	return approvals.ErrInvalidReview
+}
+
+func (r *consumeReplayRepository) ValidateGrant(_ context.Context, digest []byte, email string, now time.Time) (approvals.Grant, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.matches(digest, email) || !now.Before(r.grant.ExpiresAt) || (r.grant.Status != "active" && r.grant.Status != "claimed") {
+		return approvals.Grant{}, approvals.ErrInvalidGrant
+	}
+	return r.grant, nil
+}
+
+func (r *consumeReplayRepository) ClaimGrant(_ context.Context, digest []byte, email string, claimDigest []byte, now, claimExpiresAt time.Time) (approvals.Grant, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.matches(digest, email) || !now.Before(r.grant.ExpiresAt) {
+		return approvals.Grant{}, approvals.ErrInvalidGrant
+	}
+	switch r.grant.Status {
+	case "active":
+		r.claimDigest = append([]byte(nil), claimDigest...)
+		r.grant.Status = "claimed"
+		r.grant.ClaimExpiresAt = claimExpiresAt
+	case "claimed":
+		if subtle.ConstantTimeCompare(r.claimDigest, claimDigest) != 1 || !now.Before(r.grant.ClaimExpiresAt) {
+			return approvals.Grant{}, approvals.ErrGrantClaimed
+		}
+	default:
+		return approvals.Grant{}, approvals.ErrInvalidGrant
+	}
+	return r.grant, nil
+}
+
+func (r *consumeReplayRepository) ConsumeGrant(_ context.Context, digest []byte, email string, claimDigest []byte, now time.Time) (approvals.Grant, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.matches(digest, email) {
+		return approvals.Grant{}, approvals.ErrInvalidGrant
+	}
+	if r.grant.Status == "consumed" {
+		if subtle.ConstantTimeCompare(r.claimDigest, claimDigest) != 1 {
+			return approvals.Grant{}, approvals.ErrInvalidClaim
+		}
+		return r.grant, nil
+	}
+	if r.grant.Status != "claimed" || !now.Before(r.grant.ExpiresAt) || !now.Before(r.grant.ClaimExpiresAt) || subtle.ConstantTimeCompare(r.claimDigest, claimDigest) != 1 {
+		return approvals.Grant{}, approvals.ErrInvalidClaim
+	}
+	r.grant.Status = "consumed"
+	r.grant.ClaimExpiresAt = time.Time{}
+	return r.grant, nil
+}
+
+func (r *consumeReplayRepository) ReleaseGrant(_ context.Context, digest []byte, email string, claimDigest []byte, now time.Time) (approvals.Grant, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.matches(digest, email) || r.grant.Status != "claimed" || !now.Before(r.grant.ClaimExpiresAt) || subtle.ConstantTimeCompare(r.claimDigest, claimDigest) != 1 {
+		return approvals.Grant{}, approvals.ErrInvalidClaim
+	}
+	r.grant.Status = "active"
+	r.grant.ClaimExpiresAt = time.Time{}
+	r.claimDigest = nil
+	return r.grant, nil
+}
+
+func (r *consumeReplayRepository) matches(digest []byte, email string) bool {
+	return subtle.ConstantTimeCompare(r.tokenDigest, digest) == 1 && email == r.grant.ApprovedEmail
+}
+
 func (r *reviewRepository) ResolveReview(_ context.Context, digest []byte, now time.Time) (approvals.Application, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -177,4 +262,69 @@ func TestSignupGrantServiceAuthenticationRequired(t *testing.T) {
 	if resp.Code != http.StatusNotFound {
 		t.Fatalf("authenticated invalid grant status=%d body=%s", resp.Code, resp.Body.String())
 	}
+}
+
+func TestConsumeSignupGrantReplayReturnsSameSafeSuccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	token, tokenDigest, err := securetokens.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	repo := &consumeReplayRepository{
+		tokenDigest: tokenDigest,
+		grant: approvals.Grant{
+			ID: "grant-replay-1", ApprovedEmail: "owner@example.com", Source: approvals.GrantSourceEarlyAccess,
+			Status: "active", ExpiresAt: now.Add(time.Hour),
+		},
+	}
+	service := approvals.NewService(repo, approvals.ServiceOptions{Now: func() time.Time { return now }})
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	handler := NewServer(
+		submissions.NewService(&submissionRepositoryForReview{}, submissions.ServiceOptions{}),
+		newFakePageViews(),
+		Options{Approvals: &service, ProvisioningSecret: secret},
+	)
+	claimA := "stable-provision-operation-a"
+	payload := map[string]string{"token": token, "email": "owner@example.com", "claim_reference": claimA}
+	if resp := postAuthenticatedJSON(t, handler, secret, "/internal/signup-grants/claim", payload); resp.Code != http.StatusOK {
+		t.Fatalf("claim status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	first := postAuthenticatedJSON(t, handler, secret, "/internal/signup-grants/consume", payload)
+	second := postAuthenticatedJSON(t, handler, secret, "/internal/signup-grants/consume", payload)
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("consume statuses=%d,%d bodies=%s / %s", first.Code, second.Code, first.Body.String(), second.Body.String())
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("replay response changed: first=%s second=%s", first.Body.String(), second.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(second.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["grant_id"] != "grant-replay-1" || response["status"] != "consumed" {
+		t.Fatalf("unexpected replay response: %v", response)
+	}
+	for _, forbidden := range []string{token, claimA, "claim_reference", "digest", "secret"} {
+		if strings.Contains(second.Body.String(), forbidden) {
+			t.Fatalf("consume response exposed protected value or field %q: %s", forbidden, second.Body.String())
+		}
+	}
+	wrongClaim := map[string]string{"token": token, "email": "owner@example.com", "claim_reference": "stable-provision-operation-b"}
+	denied := postAuthenticatedJSON(t, handler, secret, "/internal/signup-grants/consume", wrongClaim)
+	assertErrorCode(t, denied, http.StatusConflict, "signup_grant_claim_conflict")
+}
+
+func postAuthenticatedJSON(t *testing.T, handler http.Handler, secret []byte, path string, payload any) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+string(secret))
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	return resp
 }
