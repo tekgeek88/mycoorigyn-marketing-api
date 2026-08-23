@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"os"
@@ -104,15 +105,91 @@ func TestSignupGrantConcurrentClaimAndConsume(t *testing.T) {
 	for err := range consumeResults {
 		if err == nil {
 			consumeSuccesses++
-		} else if !errors.Is(err, approvals.ErrInvalidClaim) {
+		} else {
 			t.Fatalf("unexpected concurrent consume error: %v", err)
 		}
 	}
-	if consumeSuccesses != 1 {
-		t.Fatalf("consume successes = %d, want 1", consumeSuccesses)
+	if consumeSuccesses != 2 {
+		t.Fatalf("same-claim consume successes = %d, want 2", consumeSuccesses)
 	}
 	if _, err := store.ValidateGrant(context.Background(), securetokens.Digest(grantToken), "concurrent@example.com", now.Add(2*time.Second)); !errors.Is(err, approvals.ErrInvalidGrant) {
 		t.Fatalf("consumed grant validated: %v", err)
+	}
+}
+
+func TestConsumeGrantReplayRetainsConsumingClaimAndOriginalTimestamps(t *testing.T) {
+	store, pool := integrationStore(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	reviewToken, submissionID := insertPendingReview(t, pool, now, "replay@example.com")
+	defer cleanupApprovalFixture(t, pool, submissionID)
+
+	_, grantDigest, err := securetokens.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, _, err := store.Approve(context.Background(), securetokens.Digest(reviewToken), approvals.GrantCandidate{
+		TokenDigest: grantDigest, SecretReference: "signup/replay", ExpiresAt: now.Add(24 * time.Hour),
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimA := securetokens.Digest("stable-provision-operation-a")
+	claimB := securetokens.Digest("stable-provision-operation-b")
+	if _, err := store.ClaimGrant(context.Background(), grantDigest, "replay@example.com", claimA, now, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := store.ConsumeGrant(context.Background(), grantDigest, "replay@example.com", claimA, now.Add(10*time.Second))
+	if err != nil || first.Status != "consumed" || first.ID != approval.GrantID {
+		t.Fatalf("first consume = %#v, err=%v", first, err)
+	}
+	var firstConsumedAt, firstUpdatedAt time.Time
+	var retainedDigest []byte
+	var claimedAtCleared, claimExpiryCleared bool
+	if err := pool.QueryRow(context.Background(), `
+		SELECT consumed_at, updated_at, claim_reference_digest,
+			claimed_at IS NULL, claim_expires_at IS NULL
+		FROM signup_grants WHERE id = $1::uuid
+	`, approval.GrantID).Scan(&firstConsumedAt, &firstUpdatedAt, &retainedDigest, &claimedAtCleared, &claimExpiryCleared); err != nil {
+		t.Fatal(err)
+	}
+	if subtle.ConstantTimeCompare(retainedDigest, claimA) != 1 || !claimedAtCleared || !claimExpiryCleared {
+		t.Fatalf("consumed claim proof or cleared lease fields are invalid")
+	}
+
+	// Simulate commit success followed by response loss, then retry after the former lease expired.
+	second, err := store.ConsumeGrant(context.Background(), grantDigest, "replay@example.com", claimA, now.Add(2*time.Hour))
+	if err != nil || second.Status != "consumed" || second.ID != first.ID {
+		t.Fatalf("replayed consume = %#v, err=%v", second, err)
+	}
+	var secondConsumedAt, secondUpdatedAt time.Time
+	if err := pool.QueryRow(context.Background(), `
+		SELECT consumed_at, updated_at FROM signup_grants WHERE id = $1::uuid
+	`, approval.GrantID).Scan(&secondConsumedAt, &secondUpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if !secondConsumedAt.Equal(firstConsumedAt) || !secondUpdatedAt.Equal(firstUpdatedAt) {
+		t.Fatalf("idempotent replay changed timestamps: consumed %s -> %s, updated %s -> %s",
+			firstConsumedAt, secondConsumedAt, firstUpdatedAt, secondUpdatedAt)
+	}
+	if _, err := store.ConsumeGrant(context.Background(), grantDigest, "replay@example.com", claimB, now.Add(3*time.Hour)); !errors.Is(err, approvals.ErrInvalidClaim) {
+		t.Fatalf("different claim replay error = %v", err)
+	}
+	if _, err := store.ValidateGrant(context.Background(), grantDigest, "replay@example.com", now.Add(2*time.Hour)); !errors.Is(err, approvals.ErrInvalidGrant) {
+		t.Fatalf("consumed grant validated: %v", err)
+	}
+	if _, err := store.ClaimGrant(context.Background(), grantDigest, "replay@example.com", claimA, now.Add(2*time.Hour), now.Add(3*time.Hour)); !errors.Is(err, approvals.ErrInvalidGrant) {
+		t.Fatalf("consumed grant reclaimed: %v", err)
+	}
+	if _, err := store.ReleaseGrant(context.Background(), grantDigest, "replay@example.com", claimA, now.Add(2*time.Hour)); !errors.Is(err, approvals.ErrInvalidClaim) {
+		t.Fatalf("consumed grant released: %v", err)
+	}
+	var grantCount int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM signup_grants WHERE early_access_submission_id = $1::uuid`, submissionID).Scan(&grantCount); err != nil {
+		t.Fatal(err)
+	}
+	if grantCount != 1 {
+		t.Fatalf("grant count = %d, want 1", grantCount)
 	}
 }
 

@@ -218,13 +218,22 @@ func (s Store) ConsumeGrant(ctx context.Context, grantDigest []byte, email strin
 	if err != nil {
 		return approvals.Grant{}, err
 	}
+	if record.Status == "consumed" {
+		if subtle.ConstantTimeCompare(currentClaim, claimDigest) != 1 {
+			return approvals.Grant{}, approvals.ErrInvalidClaim
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return approvals.Grant{}, err
+		}
+		return record, nil
+	}
 	if record.Status != "claimed" || !now.Before(record.ExpiresAt) || !now.Before(record.ClaimExpiresAt) || subtle.ConstantTimeCompare(currentClaim, claimDigest) != 1 {
 		return approvals.Grant{}, approvals.ErrInvalidClaim
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE signup_grants
 		SET status = 'consumed', consumed_at = $2,
-			claimed_at = NULL, claim_expires_at = NULL, claim_reference_digest = NULL
+			claimed_at = NULL, claim_expires_at = NULL
 		WHERE id = $1::uuid
 	`, record.ID, now); err != nil {
 		return approvals.Grant{}, err

@@ -128,7 +128,7 @@ Claim immediately before privileged provisioning. The reference must be stable f
 
 `POST /internal/signup-grants/consume` with the same three fields.
 
-Consume only after tenant provisioning and all required durable registrations have committed. Consumption atomically changes the claimed grant to `consumed`; a concurrent or later replay cannot win. Successful consumption triggers best-effort removal of the protected plaintext grant token.
+Consume only after tenant provisioning and all required durable registrations have committed. Consumption atomically changes the claimed grant to `consumed`. The consuming claim-reference digest remains on the consumed record solely so a retry with the same stable provisioning reference can reconcile a lost response as success. The plaintext claim reference is never stored, a different claim cannot replay consumption, and release or claim is never valid after consumption. An idempotent consume replay does not depend on the former claim lease and does not change the original consumption timestamp. Successful consumption triggers best-effort, replay-safe removal of the protected plaintext grant token.
 
 ### Release
 
