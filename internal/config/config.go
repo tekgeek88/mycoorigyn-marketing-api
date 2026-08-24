@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/mail"
 	"net/url"
 	"os"
 	"strconv"
@@ -31,6 +32,7 @@ type Config struct {
 	EmailProvider            string
 	EmailFrom                string
 	EmailReplyTo             string
+	EmailAllowedRecipients   []string
 	ResendAPIKeyFile         string
 	ReviewRecipient          string
 	ReviewBaseURL            string
@@ -61,6 +63,7 @@ func Load() (Config, error) {
 		EmailProvider:            strings.ToLower(strings.TrimSpace(envOrDefault("MARKETING_EMAIL_PROVIDER", "disabled"))),
 		EmailFrom:                strings.TrimSpace(os.Getenv("MARKETING_EMAIL_FROM")),
 		EmailReplyTo:             strings.TrimSpace(os.Getenv("MARKETING_EMAIL_REPLY_TO")),
+		EmailAllowedRecipients:   splitCSV(os.Getenv("MARKETING_EMAIL_ALLOWED_RECIPIENTS")),
 		ResendAPIKeyFile:         strings.TrimSpace(os.Getenv("MARKETING_RESEND_API_KEY_FILE")),
 		ReviewRecipient:          strings.TrimSpace(os.Getenv("MARKETING_EARLY_ACCESS_REVIEW_RECIPIENT")),
 		ReviewBaseURL:            strings.TrimSpace(os.Getenv("MARKETING_REVIEW_BASE_URL")),
@@ -113,6 +116,9 @@ func Load() (Config, error) {
 			return Config{}, errors.New("Resend email delivery requires sender, API-key file, reviewer recipient, review URL, and hosted signup URL")
 		}
 	}
+	if cfg.EmailAllowedRecipients, err = normalizeEmailAddresses(cfg.EmailAllowedRecipients); err != nil {
+		return Config{}, err
+	}
 	if environment == "staging" || environment == "production" {
 		if cfg.EmailProvider != "resend" {
 			return Config{}, errors.New("closed-alpha staging and production require MARKETING_EMAIL_PROVIDER=resend")
@@ -122,6 +128,9 @@ func Load() (Config, error) {
 		}
 		if err := requireHTTPSURL("MYCOORIGYN_HOSTED_SIGNUP_BASE_URL", cfg.HostedSignupBaseURL); err != nil {
 			return Config{}, err
+		}
+		if environment == "staging" && len(cfg.EmailAllowedRecipients) == 0 {
+			return Config{}, errors.New("MARKETING_EMAIL_ALLOWED_RECIPIENTS is required in staging")
 		}
 	}
 
@@ -137,6 +146,24 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func normalizeEmailAddresses(values []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		address, err := mail.ParseAddress(value)
+		if err != nil || address.Address != value || len(value) > 320 {
+			return nil, errors.New("MARKETING_EMAIL_ALLOWED_RECIPIENTS must contain valid email addresses")
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	return normalized, nil
 }
 
 func requireHTTPSURL(name, value string) error {
