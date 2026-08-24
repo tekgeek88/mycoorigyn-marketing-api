@@ -61,6 +61,13 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if len(cfg.EmailAllowedRecipients) > 0 {
+		emailSender, err = transactionalemail.NewAllowlistSender(emailSender, cfg.EmailAllowedRecipients)
+		if err != nil {
+			logger.Error("initialize transactional email allowlist", "error", err)
+			os.Exit(1)
+		}
+	}
 	service := submissions.NewService(store, submissions.ServiceOptions{
 		ReviewLifetime: cfg.ReviewLifetime,
 		Tokens:         tokenStore,

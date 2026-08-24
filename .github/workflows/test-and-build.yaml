@@ -16,17 +16,17 @@ jobs:
     steps:
       # Step 1: Checkout the repository
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       # Step 2: Set up Go environment
       - name: Setup Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: 1.25  # Use the current Go version for your project
 
       # Step 3: Cache Go modules for faster builds
       - name: Cache Go modules
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/go-build  # Cache directory for Go build artifacts
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
@@ -42,6 +42,9 @@ jobs:
         run: go test ./... -v
         env:
           ENV: testing
+
+      - name: Validate staging deployment contract
+        run: node scripts/test-staging-deployment-contract.mjs
 
       # Step 6: Verify Build
       - name: Test Build
