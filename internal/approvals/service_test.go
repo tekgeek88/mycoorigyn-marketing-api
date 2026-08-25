@@ -219,6 +219,26 @@ func TestApprovalMessageEscapesHostileFarmAndRetainsPlainTextURL(t *testing.T) {
 	}
 }
 
+func TestApprovalMessageUsesExactSignupFragmentDestination(t *testing.T) {
+	const fixture = "fixture-signup-capability"
+	message, err := buildApprovalMessage("sender@example.test", "", "https://example.test/signup", Approval{
+		ApprovedEmail: "owner@example.test", FarmName: "Fixture Farm",
+		ExpiresAt: time.Date(2026, 8, 31, 10, 32, 0, 0, time.UTC),
+	}, fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://example.test/signup#access=" + fixture
+	if !strings.Contains(message.Text, want) || !strings.Contains(message.HTML, want) {
+		t.Fatalf("approval message does not contain exact signup destination %q", want)
+	}
+	for _, forbidden := range []string{"?access=", "/early-access/review#", "staging.mycoorigyn.com"} {
+		if strings.Contains(message.Text, forbidden) || strings.Contains(message.HTML, forbidden) {
+			t.Fatalf("approval message contains forbidden value %q", forbidden)
+		}
+	}
+}
+
 func TestApprovalDeliveryFailurePreservesGrantForRetry(t *testing.T) {
 	repo, reviewToken, now := newApprovalFixture(t)
 	sender := &transactionalemail.MemorySender{Err: errors.New("provider unavailable")}

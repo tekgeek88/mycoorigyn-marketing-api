@@ -19,6 +19,19 @@ type submissionRepository struct {
 	created []Submission
 }
 
+func TestReviewURLUsesExactFragmentDestination(t *testing.T) {
+	const fixture = "fixture-review-capability"
+	got := buildReviewURL("https://example.test/early-access/review", fixture)
+	if want := "https://example.test/early-access/review#token=" + fixture; got != want {
+		t.Fatalf("review URL = %q, want %q", got, want)
+	}
+	for _, forbidden := range []string{"?token=", "staging.mycoorigyn.com", "/signup#"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("review URL contains forbidden value %q: %s", forbidden, got)
+		}
+	}
+}
+
 func (r *submissionRepository) CreateSubmission(_ context.Context, submission Submission, _ time.Time, _ *ReviewCapability) (CreateResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

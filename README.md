@@ -81,6 +81,7 @@ Local development defaults `MARKETING_EMAIL_PROVIDER` to `disabled` and stores p
 | `MARKETING_EMAIL_ALLOWED_RECIPIENTS` | Staging | none | Comma-separated, exact recipient allowlist. Staging refuses to start without at least one valid address; production behavior is unchanged when unset. |
 | `MARKETING_RESEND_API_KEY_FILE` | With Resend | none | Path to a private, regular, non-symlink file containing the Resend API key. |
 | `MARKETING_EARLY_ACCESS_REVIEW_RECIPIENT` | With Resend | none | Operator address that receives new early-access review notifications. |
+| `MARKETING_PUBLIC_WEB_ORIGIN` | Staging/production | none | Canonical browser origin that owns both capability-link routes. Must be a clean HTTPS origin and be present in `PUBLIC_CORS_ALLOWED_ORIGINS`. |
 | `MARKETING_REVIEW_BASE_URL` | With Resend | none | Frontend review-page URL. Staging and production require HTTPS with no query or fragment. |
 | `MYCOORIGYN_HOSTED_SIGNUP_BASE_URL` | With Resend | none | Hosted signup-page URL. Staging and production require HTTPS with no query or fragment. |
 | `MARKETING_TOKEN_SECRET_ROOT` | Outside local development | `.local/marketing-tokens` in development/testing | Durable, writable, private directory for recoverable review and signup tokens. |
@@ -283,7 +284,7 @@ Each route accepts the same body:
 }
 ```
 
-Review links use `<MARKETING_REVIEW_BASE_URL>#token=<token>`. The frontend must immediately remove the fragment from browser history and keep the token only in memory. No `GET` endpoint resolves or changes a review decision.
+In staging and production, review and signup bases must use `MARKETING_PUBLIC_WEB_ORIGIN` with the exact paths `/early-access/review` and `/signup`. Review links use `<MARKETING_REVIEW_BASE_URL>#token=<token>`. The frontend must immediately remove the fragment from browser history and keep the token only in memory. No `GET` endpoint resolves or changes a review decision.
 
 Approval returns `{"status":"approved","delivery_status":"delivered"}`. If applicant email delivery fails after the decision commits, the API returns `503 approval_delivery_failed`; retrying the same approval with the same in-memory token reuses the durable grant. Decline returns `{"status":"declined"}`. Repeating the same terminal decision is idempotent, while trying the opposite decision returns a conflict.
 
