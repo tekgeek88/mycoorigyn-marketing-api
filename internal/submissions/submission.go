@@ -221,7 +221,7 @@ func (s Service) sendReviewerNotification(ctx context.Context, submission Submis
 	if s.email == nil || s.emailFrom == "" || s.reviewerEmail == "" || s.reviewBaseURL == "" {
 		return errors.New("review notification is not configured")
 	}
-	reviewURL := s.reviewBaseURL + "#token=" + url.PathEscape(token)
+	reviewURL := buildReviewURL(s.reviewBaseURL, token)
 	expires := expiresAt.UTC().Format("January 2, 2006 at 15:04 UTC")
 	contextName := fallback(submission.FarmName)
 	if contextName == "—" {
@@ -263,6 +263,10 @@ func (s Service) sendReviewerNotification(ctx context.Context, submission Submis
 		To: s.reviewerEmail, From: s.emailFrom, ReplyTo: s.emailReplyTo,
 		Subject: "New MycoOrigyn Early Access request — " + contextName, Text: textBody, HTML: htmlBody,
 	})
+}
+
+func buildReviewURL(baseURL, token string) string {
+	return strings.TrimRight(strings.TrimSpace(baseURL), "/") + "#token=" + url.PathEscape(token)
 }
 
 func fallback(value string) string {

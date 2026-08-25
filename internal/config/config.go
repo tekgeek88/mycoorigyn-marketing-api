@@ -35,6 +35,7 @@ type Config struct {
 	EmailAllowedRecipients   []string
 	ResendAPIKeyFile         string
 	ReviewRecipient          string
+	PublicWebOrigin          string
 	ReviewBaseURL            string
 	HostedSignupBaseURL      string
 	TokenSecretRoot          string
@@ -66,6 +67,7 @@ func Load() (Config, error) {
 		EmailAllowedRecipients:   splitCSV(os.Getenv("MARKETING_EMAIL_ALLOWED_RECIPIENTS")),
 		ResendAPIKeyFile:         strings.TrimSpace(os.Getenv("MARKETING_RESEND_API_KEY_FILE")),
 		ReviewRecipient:          strings.TrimSpace(os.Getenv("MARKETING_EARLY_ACCESS_REVIEW_RECIPIENT")),
+		PublicWebOrigin:          strings.TrimSpace(os.Getenv("MARKETING_PUBLIC_WEB_ORIGIN")),
 		ReviewBaseURL:            strings.TrimSpace(os.Getenv("MARKETING_REVIEW_BASE_URL")),
 		HostedSignupBaseURL:      strings.TrimSpace(os.Getenv("MYCOORIGYN_HOSTED_SIGNUP_BASE_URL")),
 		TokenSecretRoot:          strings.TrimSpace(os.Getenv("MARKETING_TOKEN_SECRET_ROOT")),
@@ -123,10 +125,17 @@ func Load() (Config, error) {
 		if cfg.EmailProvider != "resend" {
 			return Config{}, errors.New("closed-alpha staging and production require MARKETING_EMAIL_PROVIDER=resend")
 		}
-		if err := requireHTTPSURL("MARKETING_REVIEW_BASE_URL", cfg.ReviewBaseURL); err != nil {
+		origin, err := requireHTTPSOrigin("MARKETING_PUBLIC_WEB_ORIGIN", cfg.PublicWebOrigin)
+		if err != nil {
 			return Config{}, err
 		}
-		if err := requireHTTPSURL("MYCOORIGYN_HOSTED_SIGNUP_BASE_URL", cfg.HostedSignupBaseURL); err != nil {
+		if !containsString(cfg.PublicCORSAllowedOrigins, cfg.PublicWebOrigin) {
+			return Config{}, errors.New("PUBLIC_CORS_ALLOWED_ORIGINS must include MARKETING_PUBLIC_WEB_ORIGIN")
+		}
+		if err := requireCapabilityLinkBase("MARKETING_REVIEW_BASE_URL", cfg.ReviewBaseURL, origin, "/early-access/review"); err != nil {
+			return Config{}, err
+		}
+		if err := requireCapabilityLinkBase("MYCOORIGYN_HOSTED_SIGNUP_BASE_URL", cfg.HostedSignupBaseURL, origin, "/signup"); err != nil {
 			return Config{}, err
 		}
 		if environment == "staging" && len(cfg.EmailAllowedRecipients) == 0 {
@@ -168,10 +177,41 @@ func normalizeEmailAddresses(values []string) ([]string, error) {
 
 func requireHTTPSURL(name, value string) error {
 	parsed, err := url.Parse(value)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return fmt.Errorf("%s must be an https URL without query or fragment", name)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return fmt.Errorf("%s must be a clean https URL without credentials, encoded path, query, or fragment", name)
 	}
 	return nil
+}
+
+func requireHTTPSOrigin(name, value string) (*url.URL, error) {
+	if err := requireHTTPSURL(name, value); err != nil {
+		return nil, err
+	}
+	parsed, _ := url.Parse(value)
+	if parsed.Path != "" {
+		return nil, fmt.Errorf("%s must be an origin without a path", name)
+	}
+	return parsed, nil
+}
+
+func requireCapabilityLinkBase(name, value string, origin *url.URL, expectedPath string) error {
+	if err := requireHTTPSURL(name, value); err != nil {
+		return err
+	}
+	parsed, _ := url.Parse(value)
+	if parsed.Path != expectedPath || parsed.Scheme != origin.Scheme || !strings.EqualFold(parsed.Host, origin.Host) {
+		return fmt.Errorf("%s must use MARKETING_PUBLIC_WEB_ORIGIN with path %s", name, expectedPath)
+	}
+	return nil
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func readPrivateSecret(path string) ([]byte, error) {

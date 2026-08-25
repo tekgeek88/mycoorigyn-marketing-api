@@ -24,13 +24,16 @@ MARKETING_EMAIL_FROM=MycoOrigyn <notifications@configured-domain.example>
 MARKETING_EMAIL_REPLY_TO=
 MARKETING_RESEND_API_KEY_FILE=/run/secrets/marketing-resend-api-key
 MARKETING_EARLY_ACCESS_REVIEW_RECIPIENT=reviewer@example.com
+MARKETING_PUBLIC_WEB_ORIGIN=https://www.example.com
 MARKETING_REVIEW_BASE_URL=https://www.example.com/early-access/review
-MYCOORIGYN_HOSTED_SIGNUP_BASE_URL=https://app.example.com/signup
+MYCOORIGYN_HOSTED_SIGNUP_BASE_URL=https://www.example.com/signup
 MARKETING_TOKEN_SECRET_ROOT=/var/lib/mycoorigyn-marketing/protected-tokens
 MARKETING_PROVISIONING_SHARED_SECRET_FILE=/run/secrets/marketing-provisioning-shared-secret
 ```
 
 The two secret files must be private regular files and must not be symlinks. The provisioning shared secret must contain at least 32 bytes on one line. The protected token root must be a durable, writable, private volume. PostgreSQL stores only SHA-256 token digests and opaque protected-file references; recoverable plaintext review and signup tokens are written atomically below that root with private permissions.
+
+`MARKETING_PUBLIC_WEB_ORIGIN` is the environment-owned canonical browser origin. In staging and production it must be HTTPS, contain no credentials/path/query/fragment, and appear in `PUBLIC_CORS_ALLOWED_ORIGINS`. The review and signup bases must use that exact origin with `/early-access/review` and `/signup` respectively. This prevents a valid capability from being delivered to another environment or to a route that does not own its browser handoff.
 
 Optional TTL configuration:
 
