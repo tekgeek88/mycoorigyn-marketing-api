@@ -40,7 +40,10 @@ func TestEarlyAccessNotifiesReviewerOnceAndUsesFragment(t *testing.T) {
 		EmailFrom: "MycoOrigyn <notify@example.com>", ReviewerEmail: "reviewer@example.com",
 		ReviewBaseURL: "https://mycoorigyn.com/early-access/review",
 	})
-	input := SubmissionInput{SubmissionType: TypeEarlyAccess, Email: "owner@example.com", Name: "<Owner>", FarmName: "Farm & Fungi"}
+	testingInterest := true
+	input := SubmissionInput{SubmissionType: TypeEarlyAccess, Email: "owner@example.com", Name: "<Owner>", FarmName: "Farm & Fungi",
+		FarmType: "Indoor", ProductionScale: "Pilot", CurrentTrackingMethod: "Spreadsheets",
+		InterestedInTesting: &testingInterest, Message: `<img src=x onerror="alert(1)">`}
 	if err := service.Submit(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
@@ -54,8 +57,16 @@ func TestEarlyAccessNotifiesReviewerOnceAndUsesFragment(t *testing.T) {
 	if !strings.Contains(messages[0].Text, "/early-access/review#token=") || strings.Contains(messages[0].Text, "?token=") {
 		t.Fatalf("review URL is not fragment-based")
 	}
-	if strings.Contains(messages[0].HTML, "<Owner>") || strings.Contains(messages[0].HTML, "Farm & Fungi") {
+	if strings.Contains(messages[0].HTML, "<Owner>") || strings.Contains(messages[0].HTML, "Farm & Fungi") || strings.Contains(messages[0].HTML, "<img") {
 		t.Fatalf("review HTML did not escape dynamic content")
+	}
+	for _, expected := range []string{"<!doctype html>", "Internal review", "Review application", "Farm type", "Production scale", "Current tracking method", "Interested in testing", "Message", "Review link expires", "&lt;Owner&gt;", "&lt;img", "background-color:#06111f", "background-color:#42d8e8"} {
+		if !strings.Contains(messages[0].HTML, expected) {
+			t.Fatalf("branded review message is missing %q", expected)
+		}
+	}
+	if strings.Count(messages[0].HTML, "#token=") != 3 || !strings.Contains(messages[0].Text, "Review link expires:") || messages[0].Subject == "" {
+		t.Fatal("review token was not confined to intended URL placements or message context is incomplete")
 	}
 }
 
