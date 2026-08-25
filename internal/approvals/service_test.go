@@ -190,8 +190,32 @@ func TestApprovalCreatesOneGrantAndResendReusesToken(t *testing.T) {
 	if strings.Contains(messages[0].HTML, "<Owner>") || strings.Contains(messages[0].HTML, "Farm & Fungi") {
 		t.Fatalf("approval HTML did not escape dynamic content")
 	}
+	for _, expected := range []string{"<!doctype html>", "Early Access approved", "Create your farm", "What happens next", "Access link expires", "background-color:#06111f", "background-color:#42d8e8"} {
+		if !strings.Contains(messages[0].HTML, expected) {
+			t.Fatalf("branded approval message is missing %q", expected)
+		}
+	}
+	if strings.Count(messages[0].HTML, "#access=") != 3 || !strings.Contains(messages[0].Text, "Access link expires:") {
+		t.Fatal("approval token was not confined to intended URL placements or text lost expiration")
+	}
 	if repo.approval == nil || len(repo.approval.TokenDigest) != 32 || strings.Contains(repo.approval.SecretReference, "#access=") {
 		t.Fatalf("unsafe durable grant model: %#v", repo.approval)
+	}
+}
+
+func TestApprovalMessageEscapesHostileFarmAndRetainsPlainTextURL(t *testing.T) {
+	message, err := buildApprovalMessage("sender@example.test", "", "https://staging.mycoorigyn.com/signup", Approval{
+		ApprovedEmail: "owner@example.test", FarmName: `<svg onload="alert(1)">Farm</svg>`,
+		ExpiresAt: time.Date(2026, 8, 31, 10, 32, 0, 0, time.UTC),
+	}, "fixture-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Subject == "" || message.HTML == "" || message.Text == "" || strings.Contains(message.HTML, "<svg") ||
+		!strings.Contains(message.HTML, "&lt;svg") || !strings.Contains(message.HTML, "Create your farm") ||
+		!strings.Contains(message.Text, "https://staging.mycoorigyn.com/signup#access=fixture-token") ||
+		strings.Count(message.HTML, "fixture-token") != 3 {
+		t.Fatal("approval branding, escaping, or bounded token placement failed")
 	}
 }
 

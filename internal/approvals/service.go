@@ -261,7 +261,10 @@ func (s Service) sendApproval(ctx context.Context, approval Approval, token stri
 	if s.email == nil || s.from == "" || s.signupBaseURL == "" {
 		return errors.New("approval delivery is not configured")
 	}
-	message := buildApprovalMessage(s.from, s.replyTo, s.signupBaseURL, approval, token)
+	message, err := buildApprovalMessage(s.from, s.replyTo, s.signupBaseURL, approval, token)
+	if err != nil {
+		return fmt.Errorf("render approval email: %w", err)
+	}
 	if err := s.email.Send(ctx, message); err != nil {
 		return fmt.Errorf("send approval email: %w", err)
 	}

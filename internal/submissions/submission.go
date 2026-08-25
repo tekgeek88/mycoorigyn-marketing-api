@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"log/slog"
 	"net/mail"
 	"net/url"
@@ -223,22 +222,46 @@ func (s Service) sendReviewerNotification(ctx context.Context, submission Submis
 		return errors.New("review notification is not configured")
 	}
 	reviewURL := s.reviewBaseURL + "#token=" + url.PathEscape(token)
+	expires := expiresAt.UTC().Format("January 2, 2006 at 15:04 UTC")
+	contextName := fallback(submission.FarmName)
+	if contextName == "—" {
+		contextName = fallback(submission.Name)
+	}
+	if contextName == "—" {
+		contextName = submission.Email
+	}
 	textBody := fmt.Sprintf(
-		"A new MycoOrigyn early-access request is ready for review.\n\nName: %s\nEmail: %s\nFarm name: %s\nFarm type: %s\nProduction scale: %s\nCurrent tracking method: %s\nInterested in testing: %s\nMessage: %s\n\nReview Early Access Request:\n%s\n\nThis review link expires %s.\n",
+		"New MycoOrigyn Early Access request — %s\n\nName: %s\nEmail: %s\nFarm: %s\nFarm type: %s\nProduction scale: %s\nCurrent tracking method: %s\nInterested in testing: %s\nMessage: %s\n\nReview application:\n%s\n\nReview link expires: %s.\n",
+		contextName,
 		fallback(submission.Name), submission.Email, fallback(submission.FarmName), fallback(submission.FarmType),
 		fallback(submission.ProductionScale), fallback(submission.CurrentTrackingMethod), boolLabel(submission.InterestedInTesting),
-		fallback(submission.Message), reviewURL, expiresAt.UTC().Format(time.RFC3339),
+		fallback(submission.Message), reviewURL, expires,
 	)
-	htmlBody := fmt.Sprintf(
-		"<h1>New MycoOrigyn early-access request</h1><dl><dt>Name</dt><dd>%s</dd><dt>Email</dt><dd>%s</dd><dt>Farm name</dt><dd>%s</dd><dt>Farm type</dt><dd>%s</dd><dt>Production scale</dt><dd>%s</dd><dt>Current tracking method</dt><dd>%s</dd><dt>Interested in testing</dt><dd>%s</dd><dt>Message</dt><dd>%s</dd></dl><p><a href=\"%s\">Review Early Access Request</a></p><p>This review link expires %s.</p>",
-		html.EscapeString(fallback(submission.Name)), html.EscapeString(submission.Email), html.EscapeString(fallback(submission.FarmName)),
-		html.EscapeString(fallback(submission.FarmType)), html.EscapeString(fallback(submission.ProductionScale)),
-		html.EscapeString(fallback(submission.CurrentTrackingMethod)), html.EscapeString(boolLabel(submission.InterestedInTesting)),
-		html.EscapeString(fallback(submission.Message)), html.EscapeString(reviewURL), html.EscapeString(expiresAt.UTC().Format(time.RFC3339)),
-	)
+	htmlBody, err := transactionalemail.RenderBrandedHTML(transactionalemail.BrandedContent{
+		Preheader: "A new MycoOrigyn Early Access request is ready for review.",
+		Eyebrow:   "Internal review",
+		Heading:   "New Early Access request",
+		Intro:     "A new farm application is ready for review. The protected review link is available until the expiration shown below.",
+		Details: []transactionalemail.BrandedDetail{
+			{Label: "Name", Value: fallback(submission.Name)},
+			{Label: "Email", Value: submission.Email},
+			{Label: "Farm", Value: fallback(submission.FarmName)},
+			{Label: "Farm type", Value: fallback(submission.FarmType)},
+			{Label: "Production scale", Value: fallback(submission.ProductionScale)},
+			{Label: "Current tracking method", Value: fallback(submission.CurrentTrackingMethod)},
+			{Label: "Interested in testing", Value: boolLabel(submission.InterestedInTesting)},
+			{Label: "Message", Value: fallback(submission.Message)},
+			{Label: "Review link expires", Value: expires},
+		},
+		Action:       transactionalemail.BrandedAction{Label: "Review application", URL: reviewURL},
+		SecurityNote: "This review link is protected and intended only for the MycoOrigyn review team.",
+	})
+	if err != nil {
+		return fmt.Errorf("render review notification: %w", err)
+	}
 	return s.email.Send(ctx, transactionalemail.Message{
 		To: s.reviewerEmail, From: s.emailFrom, ReplyTo: s.emailReplyTo,
-		Subject: "New MycoOrigyn Early Access Request", Text: textBody, HTML: htmlBody,
+		Subject: "New MycoOrigyn Early Access request — " + contextName, Text: textBody, HTML: htmlBody,
 	})
 }
 
