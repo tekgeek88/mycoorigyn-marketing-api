@@ -54,11 +54,15 @@ func TestProductionLoadsPrivateProvisioningSecret(t *testing.T) {
 	}
 }
 
-func TestProductionDoesNotRequireEmailAllowlist(t *testing.T) {
-	setBaseEnvironment(t)
-	setProtectedEnvironment(t, "production")
-	if _, err := Load(); err != nil {
-		t.Fatalf("production compatibility changed: %v", err)
+func TestProtectedEnvironmentsLoadConfiguredResend(t *testing.T) {
+	for _, environment := range []string{"staging", "production"} {
+		t.Run(environment, func(t *testing.T) {
+			setBaseEnvironment(t)
+			setProtectedEnvironment(t, environment)
+			if _, err := Load(); err != nil {
+				t.Fatalf("load %s configuration: %v", environment, err)
+			}
+		})
 	}
 }
 

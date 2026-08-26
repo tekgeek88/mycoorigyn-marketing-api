@@ -21,8 +21,6 @@ http://mycoorigyn-api.mycoorigyn-marketing-api-staging.svc.cluster.local
 
 There is no staging Ingress. Browser/public access requires a separate review and authorization.
 
-The initial staging allowlist contains only the operator review address. Add any controlled test applicant explicitly before a later enabled-staging test; never use a real applicant as a canary.
-
 ## Activation boundary
 
 Deploying this environment does not authorize an application, approval, grant, hosted signup, tenant, or email. MycoOrigyn hosted signup remains feature-disabled. A later enabled-staging milestone must separately add the required network egress and controlled test authorization.
