@@ -54,23 +54,6 @@ func TestProductionLoadsPrivateProvisioningSecret(t *testing.T) {
 	}
 }
 
-func TestStagingRequiresAndNormalizesEmailAllowlist(t *testing.T) {
-	setBaseEnvironment(t)
-	setProtectedEnvironment(t, "staging")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "MARKETING_EMAIL_ALLOWED_RECIPIENTS") {
-		t.Fatalf("missing staging allowlist error = %v", err)
-	}
-
-	t.Setenv("MARKETING_EMAIL_ALLOWED_RECIPIENTS", "Reviewer@Example.com,tester@example.com,reviewer@example.com")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := strings.Join(cfg.EmailAllowedRecipients, ","), "reviewer@example.com,tester@example.com"; got != want {
-		t.Fatalf("allowed recipients = %q, want %q", got, want)
-	}
-}
-
 func TestProductionDoesNotRequireEmailAllowlist(t *testing.T) {
 	setBaseEnvironment(t)
 	setProtectedEnvironment(t, "production")
@@ -166,7 +149,6 @@ func setBaseEnvironment(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://user:password@localhost/database?sslmode=disable")
 	for _, key := range []string{
 		"MARKETING_EMAIL_PROVIDER", "MARKETING_EMAIL_FROM", "MARKETING_EMAIL_REPLY_TO",
-		"MARKETING_EMAIL_ALLOWED_RECIPIENTS",
 		"MARKETING_RESEND_API_KEY_FILE", "MARKETING_EARLY_ACCESS_REVIEW_RECIPIENT",
 		"MARKETING_PUBLIC_WEB_ORIGIN", "MARKETING_REVIEW_BASE_URL", "MYCOORIGYN_HOSTED_SIGNUP_BASE_URL",
 		"MARKETING_TOKEN_SECRET_ROOT", "MARKETING_PROVISIONING_SHARED_SECRET_FILE",

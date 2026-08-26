@@ -78,7 +78,6 @@ Local development defaults `MARKETING_EMAIL_PROVIDER` to `disabled` and stores p
 | `MARKETING_EMAIL_PROVIDER` | Environment-dependent | `disabled` | Transactional email provider. Accepts `disabled` or `resend`; staging and production require `resend`. |
 | `MARKETING_EMAIL_FROM` | With Resend | none | Sender used for reviewer and applicant messages. |
 | `MARKETING_EMAIL_REPLY_TO` | No | none | Optional reply-to address for transactional email. |
-| `MARKETING_EMAIL_ALLOWED_RECIPIENTS` | Staging | none | Comma-separated, exact recipient allowlist. Staging refuses to start without at least one valid address; production behavior is unchanged when unset. |
 | `MARKETING_RESEND_API_KEY_FILE` | With Resend | none | Path to a private, regular, non-symlink file containing the Resend API key. |
 | `MARKETING_EARLY_ACCESS_REVIEW_RECIPIENT` | With Resend | none | Operator address that receives new early-access review notifications. |
 | `MARKETING_PUBLIC_WEB_ORIGIN` | Staging/production | none | Canonical browser origin that owns both capability-link routes. Must be a clean HTTPS origin and be present in `PUBLIC_CORS_ALLOWED_ORIGINS`. |
@@ -424,7 +423,6 @@ GOCACHE=$(pwd)/.gocache go test ./internal/postgres
 - Provide `DATABASE_URL` or the split `DB_*` values through your deployment configuration and secret store.
 - Set `PUBLIC_CORS_ALLOWED_ORIGINS` to the production marketing-site origins only.
 - Configure Resend, the reviewer and signup HTTPS URLs, a durable private token volume, and both private secret files before starting in `staging` or `production`.
-- Configure `MARKETING_EMAIL_ALLOWED_RECIPIENTS` in staging. Every reviewer or applicant message is rejected locally unless its normalized recipient is present in that exact allowlist.
 - Deliver migration `000003` through the existing migration image and release workflow; do not introduce a separate deployment path for the approval feature.
 - This service is suitable for deployment behind a load balancer, reverse proxy, or Kubernetes ingress.
 - A static marketing site can call this API directly as long as the site origin is included in `PUBLIC_CORS_ALLOWED_ORIGINS`.

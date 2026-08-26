@@ -21,10 +21,6 @@ http://mycoorigyn-api.mycoorigyn-marketing-api-staging.svc.cluster.local
 
 There is no staging Ingress. Browser/public access requires a separate review and authorization.
 
-## Email safety
-
-Staging requires `MARKETING_EMAIL_ALLOWED_RECIPIENTS`. The server refuses to start without a non-empty valid list and rejects every outgoing message whose normalized recipient is absent. Production retains its existing behavior when the variable is unset.
-
 The initial staging allowlist contains only the operator review address. Add any controlled test applicant explicitly before a later enabled-staging test; never use a real applicant as a canary.
 
 ## Activation boundary
