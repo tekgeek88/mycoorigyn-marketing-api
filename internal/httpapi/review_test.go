@@ -24,6 +24,7 @@ type reviewRepository struct {
 	reviewDigest []byte
 	application  approvals.Application
 	approval     *approvals.Approval
+	tokens       *securetokens.MemoryStore
 	approveCount int
 	declineCount int
 }
@@ -45,6 +46,22 @@ func (*consumeReplayRepository) Approve(context.Context, []byte, approvals.Grant
 
 func (*consumeReplayRepository) Decline(context.Context, []byte, time.Time) error {
 	return approvals.ErrInvalidReview
+}
+
+func (r *consumeReplayRepository) ResolveGrant(_ context.Context, digest []byte, _ time.Time) (approvals.SignupMetadata, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if subtle.ConstantTimeCompare(digest, r.tokenDigest) != 1 {
+		return approvals.SignupMetadata{}, approvals.ErrInvalidGrant
+	}
+	return approvals.SignupMetadata{
+		ApprovedEmail: r.grant.ApprovedEmail,
+		OwnerName:     "Owner",
+		FarmName:      "Example Farm",
+		Source:        r.grant.Source,
+		Status:        r.grant.Status,
+		ExpiresAt:     r.grant.ExpiresAt,
+	}, nil
 }
 
 func (r *consumeReplayRepository) ValidateGrant(_ context.Context, digest []byte, email string, now time.Time) (approvals.Grant, error) {
@@ -167,6 +184,22 @@ func (r *reviewRepository) ValidateGrant(_ context.Context, digest []byte, email
 	return approvals.Grant{ID: r.approval.GrantID, ApprovedEmail: email, Source: approvals.GrantSourceEarlyAccess, Status: "active", ExpiresAt: r.approval.ExpiresAt}, nil
 }
 
+func (r *reviewRepository) ResolveGrant(_ context.Context, digest []byte, _ time.Time) (approvals.SignupMetadata, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.approval == nil || subtle.ConstantTimeCompare(digest, r.approval.TokenDigest) != 1 {
+		return approvals.SignupMetadata{}, approvals.ErrInvalidGrant
+	}
+	return approvals.SignupMetadata{
+		ApprovedEmail: r.approval.ApprovedEmail,
+		OwnerName:     r.application.Name,
+		FarmName:      r.application.FarmName,
+		Source:        approvals.GrantSourceEarlyAccess,
+		Status:        "active",
+		ExpiresAt:     r.approval.ExpiresAt,
+	}, nil
+}
+
 func (r *reviewRepository) ClaimGrant(ctx context.Context, digest []byte, email string, _ []byte, now, claimExpiresAt time.Time) (approvals.Grant, error) {
 	grant, err := r.ValidateGrant(ctx, digest, email, now)
 	grant.Status = "claimed"
@@ -200,6 +233,7 @@ func newReviewServer(t *testing.T) (*gin.Engine, *reviewRepository, string, *tra
 		},
 	}
 	tokens := securetokens.NewMemoryStore()
+	repo.tokens = tokens
 	sender := &transactionalemail.MemorySender{}
 	service := approvals.NewService(repo, approvals.ServiceOptions{
 		Tokens: tokens, Email: sender, From: "notify@example.com",
@@ -261,6 +295,39 @@ func TestSignupGrantServiceAuthenticationRequired(t *testing.T) {
 	handler.ServeHTTP(resp, req)
 	if resp.Code != http.StatusNotFound {
 		t.Fatalf("authenticated invalid grant status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestResolveSignupGrantReturnsApprovedMetadataWithoutMutatingGrant(t *testing.T) {
+	handler, repo, reviewToken, _, secret := newReviewServer(t)
+	approved := postJSONToEndpoint(t, handler, "/public/early-access/review/approve", map[string]string{"token": reviewToken})
+	if approved.Code != http.StatusOK {
+		t.Fatalf("approve status=%d body=%s", approved.Code, approved.Body.String())
+	}
+	grantToken, err := repo.tokens.Read(context.Background(), repo.approval.SecretReference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := postAuthenticatedJSON(t, handler, secret, "/internal/signup-grants/resolve", map[string]string{"token": grantToken})
+	if response.Code != http.StatusOK {
+		t.Fatalf("resolve status=%d body=%s", response.Code, response.Body.String())
+	}
+	var metadata approvals.SignupMetadata
+	if err := json.Unmarshal(response.Body.Bytes(), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.ApprovedEmail != "owner@example.com" || metadata.OwnerName != "Owner" || metadata.FarmName != "Example Farm" {
+		t.Fatalf("unexpected metadata: %#v", metadata)
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("cache control = %q", response.Header().Get("Cache-Control"))
+	}
+	if strings.Contains(response.Body.String(), grantToken) || strings.Contains(response.Body.String(), "grant-1") {
+		t.Fatalf("resolve response exposed protected or internal data: %s", response.Body.String())
+	}
+	grant, err := repo.ValidateGrant(context.Background(), securetokens.Digest(grantToken), "owner@example.com", time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC))
+	if err != nil || grant.Status != "active" {
+		t.Fatalf("resolution mutated grant: grant=%#v err=%v", grant, err)
 	}
 }
 

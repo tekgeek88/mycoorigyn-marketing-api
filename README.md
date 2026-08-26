@@ -293,12 +293,13 @@ The provisioning service uses these internal `POST` routes:
 
 | Endpoint | Purpose |
 | --- | --- |
+| `/internal/signup-grants/resolve` | Return safe approved application metadata for an active grant without mutating it. |
 | `/internal/signup-grants/validate` | Verify the token, normalized approved email, status, and expiration without reserving it. |
 | `/internal/signup-grants/claim` | Reserve an active grant for a stable provisioning operation reference. |
 | `/internal/signup-grants/consume` | Consume the matching claim after provisioning commits successfully. |
 | `/internal/signup-grants/release` | Release the matching claim after a pre-commit provisioning failure. |
 
-All internal grant routes require `Authorization: Bearer <provisioning-shared-secret>` and `Content-Type: application/json`. Validate accepts `token` and `email`; claim, consume, and release additionally require a stable `claim_reference`:
+All internal grant routes require `Authorization: Bearer <provisioning-shared-secret>` and `Content-Type: application/json`. Resolve accepts only `token`; validate accepts `token` and `email`; claim, consume, and release additionally require a stable `claim_reference`:
 
 ```json
 {
