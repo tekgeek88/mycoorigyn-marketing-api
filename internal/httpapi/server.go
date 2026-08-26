@@ -72,6 +72,7 @@ func NewServer(service submissions.Service, pageViews pageviews.CounterService, 
 
 	internal := router.Group("/internal")
 	internal.Use(limitRequestBody(submissions.MaxRequestBodyBytes), requireServiceAuthentication(server.provisioningSecret))
+	internal.POST("/signup-grants/resolve", server.resolveSignupGrant)
 	internal.POST("/signup-grants/validate", server.validateSignupGrant)
 	internal.POST("/signup-grants/claim", server.claimSignupGrant)
 	internal.POST("/signup-grants/consume", server.consumeSignupGrant)
@@ -224,6 +225,25 @@ func (s *server) declineReview(c *gin.Context) {
 
 func (s *server) validateSignupGrant(c *gin.Context) {
 	s.handleGrantOperation(c, "validate")
+}
+
+func (s *server) resolveSignupGrant(c *gin.Context) {
+	if s.approvals == nil {
+		writeError(c, http.StatusServiceUnavailable, "service_unavailable", "Signup grants are temporarily unavailable.")
+		return
+	}
+	var req capabilityRequest
+	if err := decodeRequestBody(c, &req); err != nil {
+		s.writeDecodeError(c, err)
+		return
+	}
+	metadata, err := s.approvals.ResolveGrant(c.Request.Context(), req.Token)
+	if err != nil {
+		s.writeGrantError(c, err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, metadata)
 }
 
 func (s *server) claimSignupGrant(c *gin.Context) {

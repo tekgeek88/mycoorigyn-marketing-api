@@ -52,6 +52,24 @@ func TestSignupGrantConcurrentClaimAndConsume(t *testing.T) {
 	if grant, err := store.ValidateGrant(context.Background(), securetokens.Digest(grantToken), "concurrent@example.com", now); err != nil || grant.Status != "active" {
 		t.Fatalf("validate = %#v err=%v", grant, err)
 	}
+	metadata, err := store.ResolveGrant(context.Background(), securetokens.Digest(grantToken), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.ApprovedEmail != "concurrent@example.com" || metadata.OwnerName != "Integration Owner" || metadata.FarmName != "Integration Farm" || metadata.Status != "active" {
+		t.Fatalf("resolved metadata = %#v", metadata)
+	}
+	var statusAfterResolve string
+	var claimAfterResolve []byte
+	if err := pool.QueryRow(context.Background(), `
+		SELECT status, COALESCE(claim_reference_digest, ''::bytea)
+		FROM signup_grants WHERE id = $1::uuid
+	`, approval.GrantID).Scan(&statusAfterResolve, &claimAfterResolve); err != nil {
+		t.Fatal(err)
+	}
+	if statusAfterResolve != "active" || len(claimAfterResolve) != 0 {
+		t.Fatalf("metadata resolution mutated grant: status=%q claim_set=%t", statusAfterResolve, len(claimAfterResolve) != 0)
+	}
 
 	type result struct {
 		claim string
@@ -329,8 +347,8 @@ func insertPendingReview(t *testing.T, pool *pgxpool.Pool, now time.Time, email 
 	var submissionID string
 	err = pool.QueryRow(context.Background(), `
 		INSERT INTO early_access_submissions (
-			submission_type, email, source, status, payload_fingerprint, approval_status
-		) VALUES ('early_access', $1, 'integration_test', 'new', $2, 'pending')
+			submission_type, email, name, farm_name, source, status, payload_fingerprint, approval_status
+		) VALUES ('early_access', $1, 'Integration Owner', 'Integration Farm', 'integration_test', 'new', $2, 'pending')
 		RETURNING id::text
 	`, email, fingerprint).Scan(&submissionID)
 	if err != nil {

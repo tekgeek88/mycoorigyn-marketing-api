@@ -32,6 +32,7 @@ type Repository interface {
 	ResolveReview(ctx context.Context, reviewDigest []byte, now time.Time) (Application, error)
 	Approve(ctx context.Context, reviewDigest []byte, candidate GrantCandidate, now time.Time) (Approval, bool, error)
 	Decline(ctx context.Context, reviewDigest []byte, now time.Time) error
+	ResolveGrant(ctx context.Context, grantDigest []byte, now time.Time) (SignupMetadata, error)
 	ValidateGrant(ctx context.Context, grantDigest []byte, email string, now time.Time) (Grant, error)
 	ClaimGrant(ctx context.Context, grantDigest []byte, email string, claimDigest []byte, now, claimExpiresAt time.Time) (Grant, error)
 	ConsumeGrant(ctx context.Context, grantDigest []byte, email string, claimDigest []byte, now time.Time) (Grant, error)
@@ -83,6 +84,15 @@ type Grant struct {
 	ExpiresAt       time.Time `json:"expires_at"`
 	ClaimExpiresAt  time.Time `json:"claim_expires_at,omitempty"`
 	SecretReference string    `json:"-"`
+}
+
+type SignupMetadata struct {
+	ApprovedEmail string    `json:"approved_email"`
+	OwnerName     string    `json:"owner_name"`
+	FarmName      string    `json:"farm_name"`
+	Source        string    `json:"-"`
+	Status        string    `json:"-"`
+	ExpiresAt     time.Time `json:"-"`
 }
 
 type Service struct {
@@ -191,6 +201,28 @@ func (s Service) ValidateGrant(ctx context.Context, token, email string) (Grant,
 		return Grant{}, ErrInvalidGrant
 	}
 	return s.repo.ValidateGrant(ctx, securetokens.Digest(token), email, s.now())
+}
+
+func (s Service) ResolveGrant(ctx context.Context, token string) (SignupMetadata, error) {
+	if validateToken(token) != nil {
+		return SignupMetadata{}, ErrInvalidGrant
+	}
+	now := s.now()
+	metadata, err := s.repo.ResolveGrant(ctx, securetokens.Digest(token), now)
+	if err != nil {
+		return SignupMetadata{}, err
+	}
+	if metadata.Source != GrantSourceEarlyAccess || metadata.Status != "active" {
+		return SignupMetadata{}, ErrInvalidGrant
+	}
+	if !now.Before(metadata.ExpiresAt) {
+		return SignupMetadata{}, ErrGrantExpired
+	}
+	return SignupMetadata{
+		ApprovedEmail: metadata.ApprovedEmail,
+		OwnerName:     metadata.OwnerName,
+		FarmName:      metadata.FarmName,
+	}, nil
 }
 
 func (s Service) ClaimGrant(ctx context.Context, token, email, claimReference string) (Grant, error) {

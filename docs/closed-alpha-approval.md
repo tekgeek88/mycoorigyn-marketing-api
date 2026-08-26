@@ -103,6 +103,20 @@ Content-Type: application/json
 
 The bearer value is constant-time compared and never belongs in a URL or log.
 
+### Resolve approved application metadata
+
+`POST /internal/signup-grants/resolve`
+
+```json
+{"token":"..."}
+```
+
+For an active, unexpired Early Access grant, resolution returns only the
+approved email, applicant name, and farm name already stored on the associated
+submission. It does not claim or consume the grant, create a signup operation,
+or return internal identifiers. This lets hosted signup derive the approved
+identity server-side while treating owner and farm names as editable defaults.
+
 ### Validate
 
 `POST /internal/signup-grants/validate`

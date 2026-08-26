@@ -116,6 +116,22 @@ func (f *fakeRepository) ValidateGrant(_ context.Context, digest []byte, email s
 	return f.grant, nil
 }
 
+func (f *fakeRepository) ResolveGrant(_ context.Context, digest []byte, now time.Time) (SignupMetadata, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.approval == nil || subtle.ConstantTimeCompare(digest, f.approval.TokenDigest) != 1 {
+		return SignupMetadata{}, ErrInvalidGrant
+	}
+	return SignupMetadata{
+		ApprovedEmail: f.grant.ApprovedEmail,
+		OwnerName:     f.application.Name,
+		FarmName:      f.application.FarmName,
+		Source:        f.grant.Source,
+		Status:        f.grant.Status,
+		ExpiresAt:     f.grant.ExpiresAt,
+	}, nil
+}
+
 func (f *fakeRepository) ClaimGrant(ctx context.Context, digest []byte, email string, claimDigest []byte, now, claimExpiresAt time.Time) (Grant, error) {
 	if _, err := f.ValidateGrant(ctx, digest, email, now); err != nil {
 		return Grant{}, err
@@ -306,6 +322,59 @@ func TestGrantClaimReleaseConsumeContract(t *testing.T) {
 	}
 	if _, err := service.ValidateGrant(context.Background(), token, "owner@example.com"); !errors.Is(err, ErrInvalidGrant) {
 		t.Fatalf("consumed grant validated: %v", err)
+	}
+}
+
+func TestResolveGrantReturnsApprovedApplicationMetadataWithoutMutation(t *testing.T) {
+	repo, reviewToken, now := newApprovalFixture(t)
+	service := NewService(repo, ServiceOptions{
+		Tokens: securetokens.NewMemoryStore(), Email: &transactionalemail.MemorySender{}, From: "notify@example.com",
+		SignupBaseURL: "https://app.example.com/signup", Now: func() time.Time { return now },
+	})
+	if _, err := service.Approve(context.Background(), reviewToken); err != nil {
+		t.Fatal(err)
+	}
+	token, err := service.tokens.Read(context.Background(), repo.approval.SecretReference)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	metadata, err := service.ResolveGrant(context.Background(), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.ApprovedEmail != "owner@example.com" || metadata.OwnerName != "<Owner>" || metadata.FarmName != "Farm & Fungi" {
+		t.Fatalf("unexpected metadata: %#v", metadata)
+	}
+	if repo.grant.Status != "active" || len(repo.claimDigest) != 0 {
+		t.Fatalf("resolution mutated grant: status=%q claim_digest_set=%t", repo.grant.Status, len(repo.claimDigest) != 0)
+	}
+}
+
+func TestResolveGrantFailsClosedForInvalidExpiredAndUnavailableGrants(t *testing.T) {
+	repo, reviewToken, now := newApprovalFixture(t)
+	service := NewService(repo, ServiceOptions{
+		Tokens: securetokens.NewMemoryStore(), Email: &transactionalemail.MemorySender{}, From: "notify@example.com",
+		SignupBaseURL: "https://app.example.com/signup", Now: func() time.Time { return now },
+	})
+	if _, err := service.Approve(context.Background(), reviewToken); err != nil {
+		t.Fatal(err)
+	}
+	token, err := service.tokens.Read(context.Background(), repo.approval.SecretReference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ResolveGrant(context.Background(), "invalid"); !errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("invalid token error = %v", err)
+	}
+	repo.grant.ExpiresAt = now
+	if _, err := service.ResolveGrant(context.Background(), token); !errors.Is(err, ErrGrantExpired) {
+		t.Fatalf("expired grant error = %v", err)
+	}
+	repo.grant.ExpiresAt = now.Add(time.Hour)
+	repo.grant.Status = "revoked"
+	if _, err := service.ResolveGrant(context.Background(), token); !errors.Is(err, ErrInvalidGrant) {
+		t.Fatalf("revoked grant error = %v", err)
 	}
 }
 

@@ -160,6 +160,31 @@ func (s Store) ValidateGrant(ctx context.Context, grantDigest []byte, email stri
 	return record, nil
 }
 
+func (s Store) ResolveGrant(ctx context.Context, grantDigest []byte, _ time.Time) (approvals.SignupMetadata, error) {
+	var metadata approvals.SignupMetadata
+	err := s.pool.QueryRow(ctx, `
+		SELECT g.approved_email, COALESCE(s.name, ''), COALESCE(s.farm_name, ''),
+			g.source, g.status, g.expires_at
+		FROM signup_grants g
+		JOIN early_access_submissions s ON s.id = g.early_access_submission_id
+		WHERE g.token_digest = $1
+	`, grantDigest).Scan(
+		&metadata.ApprovedEmail,
+		&metadata.OwnerName,
+		&metadata.FarmName,
+		&metadata.Source,
+		&metadata.Status,
+		&metadata.ExpiresAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return approvals.SignupMetadata{}, approvals.ErrInvalidGrant
+	}
+	if err != nil {
+		return approvals.SignupMetadata{}, err
+	}
+	return metadata, nil
+}
+
 func (s Store) ClaimGrant(ctx context.Context, grantDigest []byte, email string, claimDigest []byte, now, claimExpiresAt time.Time) (approvals.Grant, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
