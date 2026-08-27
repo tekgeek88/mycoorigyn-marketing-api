@@ -4,7 +4,7 @@ The marketing API staging environment is isolated from production and is deploye
 
 ## Release boundary
 
-- `.github/workflows/release.yaml` remains the production semantic-tag promotion path.
+- `.github/workflows/release.yaml` is an artifact-only semantic-tag publication path; it never promotes production.
 - `.github/workflows/staging.yaml` runs only after the main test workflow passes for a push to `main`.
 - The staging workflow checks out the tested SHA, proves it is still current `main`, builds application and migration images tagged `staging-<40-character-source-sha>`, and updates only the staging paths in `tekgeek88/argocd-apps`.
 - The staging workflow has no manual-dispatch trigger and refuses any GitOps change outside its four allowlisted staging identity files.

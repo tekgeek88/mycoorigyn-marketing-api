@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
 import fs from "node:fs";
 
-const productionWorkflow = fs.readFileSync(".github/workflows/release.yaml");
-assert.equal(
-  crypto.createHash("sha256").update(productionWorkflow).digest("hex"),
-  "90d9bd76ad76db03be3b18268a20f04c6eff0bd4bf2e8e02f5d5a24dc44116f2",
-  "the production semantic-tag release workflow must remain byte-for-byte unchanged",
+const productionWorkflow = fs.readFileSync(".github/workflows/release.yaml", "utf8");
+assert.ok(
+  productionWorkflow.includes("release-metadata.json"),
+  "the production semantic-tag workflow must publish immutable metadata",
 );
+for (const forbidden of ["GH_PAT", "argocd-apps.git", "git push origin main"]) {
+  assert.ok(
+    !productionWorkflow.includes(forbidden),
+    `the production semantic-tag workflow must not mutate GitOps: ${forbidden}`,
+  );
+}
 
 const staging = fs.readFileSync(".github/workflows/staging.yaml", "utf8");
 for (const required of [

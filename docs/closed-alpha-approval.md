@@ -2,15 +2,15 @@
 
 This service is the approval gate for the operator-assisted MycoOrigyn closed alpha. It stores marketing applications and issues authorization to begin one hosted-farm provisioning operation. It does not create tenants, databases, platform users, memberships, passwords, sessions, subscriptions, or billing records.
 
-## Existing release contract
+## Artifact and promotion contract
 
-The repository's release process is unchanged:
+The repository separates artifact publication from production promotion:
 
 1. Pull requests and pushes to `main` use `.github/workflows/test-and-build.yaml`.
 2. The operator creates a semantic `v*.*.*` tag only after review.
-3. `.github/workflows/release.yaml` builds and publishes the application and migration images.
-4. That existing workflow updates the production image and migration-job tags in the established ArgoCD repository.
-5. The migration image runs the normal `golang-migrate` files before the new application serves traffic.
+3. `.github/workflows/release.yaml` builds and publishes the application and migration images plus immutable digest metadata.
+4. A separate reviewed and owner-authorized `argocd-apps` promotion plan pins those artifacts; the tag workflow never changes production GitOps.
+5. During promotion, the migration image runs the normal `golang-migrate` files as a gated Argo PreSync job before the new application serves traffic.
 
 Do not deploy this feature by inventing a different workflow. Migration `000003` is delivered by the existing migration image.
 
