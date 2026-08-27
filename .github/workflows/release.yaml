@@ -1,4 +1,4 @@
-name: Release api
+name: Publish marketing release artifacts
 
 on:
   push:
@@ -6,24 +6,48 @@ on:
       - 'v*.*.*'
 
 jobs:
-  build-and-release:
-    name: Build and Release
+  publish:
+    name: Build and publish immutable artifact metadata
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
 
     env:
-      IMAGE_NAME: tekgeek88/mycoorigyn-marketing-api
-      MIGRATIONS_IMAGE_NAME: tekgeek88/mycoorigyn-marketing-migrations
+      API_IMAGE: tekgeek88/mycoorigyn-marketing-api
+      MIGRATIONS_IMAGE: tekgeek88/mycoorigyn-marketing-migrations
 
     steps:
-      - name: Checkout Code
+      - name: Checkout exact tagged source
         uses: actions/checkout@v4
 
-      - name: Set Version
+      - name: Validate release and migration identities
+        id: identity
+        shell: bash
         run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Tag must be an exact semantic version (vMAJOR.MINOR.PATCH)." >&2
+            exit 1
+          }
+          source_sha=$(git rev-parse HEAD)
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          mapfile -t up_files < <(find migrations -maxdepth 1 -type f -name '*.up.sql' -print | LC_ALL=C sort)
+          mapfile -t down_files < <(find migrations -maxdepth 1 -type f -name '*.down.sql' -print | LC_ALL=C sort)
+          [[ "${#up_files[@]}" -gt 0 && "${#up_files[@]}" -eq "${#down_files[@]}" ]] || {
+            echo 'Migration up/down inventory is incomplete.' >&2
+            exit 1
+          }
+          for up_file in "${up_files[@]}"; do
+            [[ -f "${up_file%.up.sql}.down.sql" ]] || {
+              echo "Missing down migration for $up_file" >&2
+              exit 1
+            }
+          done
+          migration_sha=$(find migrations -maxdepth 1 -type f -name '*.sql' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+          [[ "$migration_sha" =~ ^[0-9a-f]{64}$ ]]
+          printf 'version=%s\nsource_sha=%s\nmigration_pairs=%s\nmigration_sha=%s\n' \
+            "$version" "$source_sha" "${#up_files[@]}" "$migration_sha" >>"$GITHUB_OUTPUT"
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -31,68 +55,75 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build and Push Docker Image
-        run: |
-          docker build --build-arg ENV=production -t "$IMAGE_NAME:$VERSION" .
-          docker push "$IMAGE_NAME:$VERSION"
-          echo "Pushed docker image: $IMAGE_NAME:$VERSION"
-
-      - name: Build and Push Migration Image
-        run: |
-          docker build -f Dockerfile.migrations -t "$MIGRATIONS_IMAGE_NAME:$VERSION" .
-          docker push "$MIGRATIONS_IMAGE_NAME:$VERSION"
-          echo "Pushed docker image: $MIGRATIONS_IMAGE_NAME:$VERSION"
-
-      - name: Update ArgoCD GitOps Repo (Production)
+      - name: Build and push versioned API and migration images
+        shell: bash
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
         run: |
           set -euo pipefail
+          docker build --build-arg ENV=production --tag "$API_IMAGE:$VERSION" .
+          docker push "$API_IMAGE:$VERSION"
+          docker build --file Dockerfile.migrations --tag "$MIGRATIONS_IMAGE:$VERSION" .
+          docker push "$MIGRATIONS_IMAGE:$VERSION"
 
-          REPO_URL="https://x-access-token:${{ secrets.GH_PAT }}@github.com/tekgeek88/argocd-apps.git"
-          REPO_NAME="argocd-apps"
-          VERSION_TAG="${{ env.VERSION }}"
-          TIMESTAMP=$(date +%s)
-          REPO_PATH="$GITHUB_WORKSPACE/$REPO_NAME"
-          APP_PATH="$REPO_PATH/apps/mycoorigyn/api"
-          DEPLOYMENT_FILE="$APP_PATH/base/deployment.yaml"
-          PRODUCTION_KUSTOMIZATION="$APP_PATH/overlays/production/kustomization.yaml"
-          MIGRATION_JOB_FILE="$APP_PATH/overlays/production/migrations/db-migrate-job.yaml"
+      - name: Resolve immutable digests and write release metadata
+        id: metadata
+        shell: bash
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
+          MIGRATION_PAIRS: ${{ steps.identity.outputs.migration_pairs }}
+          MIGRATION_SHA: ${{ steps.identity.outputs.migration_sha }}
+        run: |
+          set -euo pipefail
+          api_manifest=$(docker buildx imagetools inspect "$API_IMAGE:$VERSION" --format '{{json .Manifest}}')
+          migrations_manifest=$(docker buildx imagetools inspect "$MIGRATIONS_IMAGE:$VERSION" --format '{{json .Manifest}}')
+          api_digest=$(jq -er '.digest // .Digest' <<<"$api_manifest")
+          migrations_digest=$(jq -er '.digest // .Digest' <<<"$migrations_manifest")
+          [[ "$api_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$migrations_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          published_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          jq -n \
+            --arg version "$VERSION" \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg publishedAt "$published_at" \
+            --arg apiRepository "$API_IMAGE" \
+            --arg apiDigest "$api_digest" \
+            --arg migrationsRepository "$MIGRATIONS_IMAGE" \
+            --arg migrationsDigest "$migrations_digest" \
+            --arg migrationInventorySha256 "sha256:$MIGRATION_SHA" \
+            --argjson migrationPairs "$MIGRATION_PAIRS" \
+            '{schemaVersion:1,component:"marketing",version:$version,sourceSha:$sourceSha,publishedAt:$publishedAt,migrations:{pairCount:$migrationPairs,inventorySha256:$migrationInventorySha256,check:"passed"},images:{api:{repository:$apiRepository,digest:$apiDigest,immutableRef:($apiRepository+"@"+$apiDigest)},migrations:{repository:$migrationsRepository,digest:$migrationsDigest,immutableRef:($migrationsRepository+"@"+$migrationsDigest)}}}' \
+            >release-metadata.json
+          printf 'api_digest=%s\nmigrations_digest=%s\n' "$api_digest" "$migrations_digest" >>"$GITHUB_OUTPUT"
 
-          git config --global user.name "github-actions"
-          git config --global user.email "actions@github.com"
+      - name: Upload machine-readable release metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: marketing-${{ steps.identity.outputs.version }}-release-metadata
+          path: release-metadata.json
+          if-no-files-found: error
+          retention-days: 90
 
-          git clone "$REPO_URL" "$REPO_PATH"
-
-          if [ ! -f "$DEPLOYMENT_FILE" ]; then
-            echo "Missing deployment file: $DEPLOYMENT_FILE"
-            exit 1
-          fi
-
-          if [ ! -f "$PRODUCTION_KUSTOMIZATION" ]; then
-            echo "Missing production kustomization: $PRODUCTION_KUSTOMIZATION"
-            exit 1
-          fi
-
-          if [ ! -f "$MIGRATION_JOB_FILE" ]; then
-            echo "Missing migration job file: $MIGRATION_JOB_FILE"
-            exit 1
-          fi
-
-          sed -i "s/last-update: \".*\"/last-update: \"$TIMESTAMP\"/" "$DEPLOYMENT_FILE"
-
-          sed -i "/name: tekgeek88\/mycoorigyn-marketing-api/{n;s/newName: .*/newName: tekgeek88\/mycoorigyn-marketing-api/;n;s/newTag: .*/newTag: $VERSION_TAG/;}" "$PRODUCTION_KUSTOMIZATION"
-          sed -i "/name: tekgeek88\/mycoorigyn-marketing-migrations/{n;s/newName: .*/newName: tekgeek88\/mycoorigyn-marketing-migrations/;n;s/newTag: .*/newTag: $VERSION_TAG/;}" "$PRODUCTION_KUSTOMIZATION"
-
-          sed -i "s|^\( *image: \).*|\1$MIGRATIONS_IMAGE_NAME:$VERSION_TAG|" "$MIGRATION_JOB_FILE"
-          sed -i "s|^  name: mycoorigyn-db-migrate-.*$|  name: mycoorigyn-db-migrate-$VERSION_TAG|" "$MIGRATION_JOB_FILE"
-
-          cd "$REPO_PATH"
-          if [ -n "$(git status --porcelain)" ]; then
-            git add .
-            git commit -m "Update mycoorigyn api production image to $VERSION_TAG"
-            git push origin main
-            echo "Changes committed and pushed."
-          else
-            echo "No changes to commit."
-          fi
-
-          echo "Deploying version: $VERSION_TAG"
+      - name: Summarize published artifacts
+        shell: bash
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
+          API_DIGEST: ${{ steps.metadata.outputs.api_digest }}
+          MIGRATIONS_DIGEST: ${{ steps.metadata.outputs.migrations_digest }}
+          MIGRATION_PAIRS: ${{ steps.identity.outputs.migration_pairs }}
+          MIGRATION_SHA: ${{ steps.identity.outputs.migration_sha }}
+        run: |
+          {
+            echo '## MycoOrigyn marketing artifacts published'
+            echo
+            echo "- Version: \`$VERSION\`"
+            echo "- Source: \`$SOURCE_SHA\`"
+            echo "- API image: \`$API_IMAGE@$API_DIGEST\`"
+            echo "- Migrations image: \`$MIGRATIONS_IMAGE@$MIGRATIONS_DIGEST\`"
+            echo "- Migration inventory: \`$MIGRATION_PAIRS pairs / sha256:$MIGRATION_SHA\`"
+            echo '- Migration execution: **none**'
+            echo '- Production GitOps mutation: **none**'
+            echo '- Promotion requires a separately reviewed and owner-authorized argocd-apps plan.'
+          } >>"$GITHUB_STEP_SUMMARY"

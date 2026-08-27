@@ -132,7 +132,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/000002_create_page_views.u
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/000003_add_early_access_approvals.up.sql
 ```
 
-Migration `000003` must be applied before deploying v0.0.5. It adds approval state to early-access submissions and creates the review-capability and signup-grant tables. The normal release workflow publishes a migration image that runs these `golang-migrate` files before the application serves traffic. See [Database Migrations](docs/MIGRATIONS.md) for migration authoring and rollback guidance.
+Migration `000003` must be applied before deploying v0.0.5. It adds approval state to early-access submissions and creates the review-capability and signup-grant tables. The semantic-tag workflow publishes an immutable migration image and metadata but does not execute it. A separately reviewed production GitOps promotion runs the image as a gated Argo PreSync job before the application serves traffic. See [Database Migrations](docs/MIGRATIONS.md) for migration authoring and rollback guidance.
 
 ## API Endpoints
 
@@ -424,7 +424,7 @@ GOCACHE=$(pwd)/.gocache go test ./internal/postgres
 - Provide `DATABASE_URL` or the split `DB_*` values through your deployment configuration and secret store.
 - Set `PUBLIC_CORS_ALLOWED_ORIGINS` to the production marketing-site origins only.
 - Configure Resend, the reviewer and signup HTTPS URLs, a durable private token volume, and both private secret files before starting in `staging` or `production`.
-- Deliver migration `000003` through the existing migration image and release workflow; do not introduce a separate deployment path for the approval feature.
+- Deliver migration `000003` through the published migration image and the separately reviewed production promotion plan; artifact publication itself never executes a migration.
 - This service is suitable for deployment behind a load balancer, reverse proxy, or Kubernetes ingress.
 - A static marketing site can call this API directly as long as the site origin is included in `PUBLIC_CORS_ALLOWED_ORIGINS`.
 

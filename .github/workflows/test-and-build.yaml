@@ -46,6 +46,9 @@ jobs:
       - name: Validate staging deployment contract
         run: node scripts/test-staging-deployment-contract.mjs
 
+      - name: Validate artifact-only release contract
+        run: node scripts/test-release-publication-contract.mjs
+
       # Step 6: Verify Build
       - name: Test Build
         run: go build -v ./...

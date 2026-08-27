@@ -1,104 +1,45 @@
-# 🚀 Release Process
-## When main is stable and ready for production, we cut a new release using the following steps:
+# Release process
 
-# 🧾 Step-by-Step Release Instructions
-### 1️⃣ Ensure you're on the latest main branch
-### Merge all completed features and bug fixes to main branch (squash and merge)
-```
-git checkout production
-git pull
-git checkout main
-git pull
-```
+MycoOrigyn marketing uses semantic versions (`vMAJOR.MINOR.PATCH`) for immutable
+artifact publication. Publication, migration execution, and production
+promotion are separate operations.
 
-# 2️⃣ Create a release branch with the target version
-```
-git checkout -b release/v0.1.0
-git merge production
-```
+## Publish artifacts
 
-# 3️⃣ Update version files and changelog
-### This is easiest at the step after you create the PR to prod because it will show you a list of commits
+1. Merge the reviewed source to the intended release branch.
+2. Create an exact semantic tag on that reviewed commit.
+3. Push the tag.
+4. `.github/workflows/release.yaml` builds and pushes the versioned API and
+   migrations images.
+5. The workflow verifies paired migration files, resolves both registry
+   digests, and uploads `release-metadata.json` containing version, source SHA,
+   image repositories/digests, migration-pair count, and migration inventory
+   hash.
 
-# 4️⃣ Commit your release updates
-```
-git add .
-git commit -m "Release v0.1.0"
-```
+The tag workflow has read-only repository contents permission. It does not
+clone `tekgeek88/argocd-apps`, use a GitOps PAT, update production manifests,
+execute migrations, or push to a GitOps branch. Publishing a tag never deploys
+production.
 
-# 5️⃣ Push release branch to GitHub
-```
-git push origin release/v0.1.0
-```
+## Qualify and promote
 
-# 6️⃣ Open a Pull Request:
-### - Base: production
-### - Compare: release/v0.1.0
-### - Get review and approval
+Pin the immutable metadata in staging and complete the normal service,
+migration, email, and closed-alpha qualification. A production proposal belongs
+in one reviewed `argocd-apps` PR and machine-readable promotion plan. Merging
+that PR remains an explicit owner decision.
 
-# 7️⃣ After merge, create a git tag on production
-```
-git checkout production
-git pull
-git tag v0.1.0
-git push origin v0.1.0
+The production orchestrator runs the exact migration image as a gated Argo
+PreSync job, verifies the expected migration delta and clean schema, then admits
+later Runtime and landing phases only after marketing is healthy.
+
+```text
+source merged
+  -> semantic tag publishes API/migrations metadata
+  -> staging qualified
+  -> production promotion PR/plan reviewed
+  -> owner authorizes merge
+  -> PreSync migration gate and ordered promotion execute
 ```
 
-# 8️⃣ Ensure production is up-to-date after the release and merge into main
-```
-git checkout production
-git pull
-git checkout main
-git pull
-git merge production
-git push
-```
-
-
-
-
-# 🔥 Hotfix Process
-## Use this flow when you need to patch a production issue quickly.
-
-# 1️⃣ Checkout and update production
-```
-git checkout production
-git pull
-```
-
-# 2️⃣ Create a hotfix branch from production
-```
-git checkout -b hotfix/QME-1234_hotfix_fix-login-crash
-```
-
-# 3️⃣ Make the fix and commit it
-```
-git add .
-git commit -m "Fix login crash affecting production users"
-```
-
-# 4️⃣ Push the hotfix branch and open PR → production
-```
-git push origin hotfix/QME-1234_hotfix_fix-login-crash
-```
-
-# Update the changelog
-
-# 5️⃣ Merge PR into production after review
-# This deploys the fix to production once tagged
-
-# 6️⃣ Tag the release
-```
-git checkout production
-git pull
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-# 7️⃣ Merge hotfix back into dev to avoid losing the patch
-```
-git checkout main
-git pull
-git merge production
-git push
-```
+Hotfixes use the same separation. Never edit or push production GitOps from
+this repository's release workflow.
